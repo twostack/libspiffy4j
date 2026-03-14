@@ -4,6 +4,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.typesafe.config.Config;
 import org.twostack.libspiffy4j.config.ActorSystemFactory;
 import org.twostack.libspiffy4j.projection.WalletProjectionSetup;
+import org.twostack.libspiffy4j.service.CryptoService;
+import org.twostack.libspiffy4j.service.EncryptionService;
+import org.twostack.libspiffy4j.storage.postgres.SecureStorage;
 
 import javax.sql.DataSource;
 
@@ -15,6 +18,7 @@ public final class LibSpiffy4jBuilder {
     private DataSource dataSource;
     private ObjectMapper objectMapper;
     private Object meterRegistry;
+    private byte[] encryptionMasterKey;
     Config configOverride; // package-private for testing
 
     LibSpiffy4jBuilder() {}
@@ -42,6 +46,15 @@ public final class LibSpiffy4jBuilder {
         return this;
     }
 
+    /**
+     * Sets the 32-byte master key for encryption. If not provided,
+     * {@link LibSpiffy4j#encryptionService()} will return {@code null}.
+     */
+    public LibSpiffy4jBuilder encryptionMasterKey(byte[] key) {
+        this.encryptionMasterKey = key;
+        return this;
+    }
+
     public LibSpiffy4j build() {
         if (dataSource == null) {
             throw new IllegalStateException("DataSource is required");
@@ -50,6 +63,13 @@ public final class LibSpiffy4jBuilder {
         var system = ActorSystemFactory.create(
                 systemName, dataSource, objectMapper, meterRegistry, configOverride);
         WalletProjectionSetup.init(system);
-        return new LibSpiffy4j(system);
+
+        CryptoService cryptoService = new CryptoService();
+        EncryptionService encryptionService = encryptionMasterKey != null
+                ? new EncryptionService(encryptionMasterKey)
+                : null;
+        SecureStorage secureStorage = new SecureStorage();
+
+        return new LibSpiffy4j(system, cryptoService, encryptionService, secureStorage);
     }
 }

@@ -16,6 +16,7 @@ tasks.withType<JavaCompile>().configureEach {
 }
 
 repositories {
+    mavenLocal()
     mavenCentral()
 }
 
@@ -26,7 +27,7 @@ val scalaVersion = "2.13"
 
 dependencies {
     // Bitcoin4j — API dependency (transitive to consumers)
-    // api("org.twostack:bitcoin4j:1.7.0") // TODO: verify Maven coordinates
+    api("org.twostack:bitcoin4j:1.7.0")
 
     // Pekko Actor
     implementation("org.apache.pekko:pekko-actor-typed_$scalaVersion:$pekkoVersion")
