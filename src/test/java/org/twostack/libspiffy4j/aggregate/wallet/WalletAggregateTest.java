@@ -147,7 +147,7 @@ class WalletAggregateTest {
         WalletReply reply = probe.receiveMessage(TIMEOUT);
         assertThat(reply).isInstanceOf(WalletReply.Success.class);
         WalletState state = ((WalletReply.Success) reply).state();
-        assertThat(state.getAddresses()).containsKey("tb1qaddr4");
+        assertThat(state.getKnownAddresses()).contains("tb1qaddr4");
         assertThat(state.getNextDerivationIndex()).isEqualTo(1);
     }
 
@@ -179,13 +179,13 @@ class WalletAggregateTest {
         WalletReply reply = probe.receiveMessage(TIMEOUT);
         assertThat(reply).isInstanceOf(WalletReply.Success.class);
         WalletState state = ((WalletReply.Success) reply).state();
-        assertThat(state.getUtxos()).containsKey("tx6:0");
-        assertThat(state.getUnconfirmedBalanceSats()).isEqualTo(50000);
+        assertThat(state.getUtxoEntries()).containsKey("tx6:0");
+        assertThat(state.getUtxoEntries().get("tx6:0").valueSats()).isEqualTo(50000);
     }
 
-    // 7. recordUtxo_confirmedUpdatesCorrectBalance
+    // 7. recordUtxo_confirmedTracksEntry
     @Test
-    void recordUtxo_confirmedUpdatesCorrectBalance() {
+    void recordUtxo_confirmedTracksEntry() {
         createWallet("wallet-7");
         TestProbe<WalletReply> probe = testKit.createTestProbe();
         BitcoinUtxo utxo = makeUtxo("tx7", 0, 75000, 6);
@@ -194,8 +194,9 @@ class WalletAggregateTest {
         WalletReply reply = probe.receiveMessage(TIMEOUT);
         assertThat(reply).isInstanceOf(WalletReply.Success.class);
         WalletState state = ((WalletReply.Success) reply).state();
-        assertThat(state.getConfirmedBalanceSats()).isEqualTo(75000);
-        assertThat(state.getUnconfirmedBalanceSats()).isEqualTo(0);
+        assertThat(state.getUtxoEntries()).containsKey("tx7:0");
+        assertThat(state.getUtxoEntries().get("tx7:0").valueSats()).isEqualTo(75000);
+        assertThat(state.getUtxoEntries().get("tx7:0").status()).isEqualTo(UtxoStatus.AVAILABLE);
     }
 
     // 8. reserveUtxo_succeeds
@@ -214,9 +215,7 @@ class WalletAggregateTest {
         WalletReply reply = probe.receiveMessage(TIMEOUT);
         assertThat(reply).isInstanceOf(WalletReply.Success.class);
         WalletState state = ((WalletReply.Success) reply).state();
-        assertThat(state.getUtxos().get("tx8:0").status()).isEqualTo(UtxoStatus.RESERVED);
-        assertThat(state.getReservedBalanceSats()).isEqualTo(60000);
-        assertThat(state.getConfirmedBalanceSats()).isEqualTo(0);
+        assertThat(state.getUtxoEntries().get("tx8:0").status()).isEqualTo(UtxoStatus.RESERVED);
     }
 
     // 9. reserveUtxo_failsWhenSpent
@@ -261,9 +260,7 @@ class WalletAggregateTest {
         WalletReply reply = probe.receiveMessage(TIMEOUT);
         assertThat(reply).isInstanceOf(WalletReply.Success.class);
         WalletState state = ((WalletReply.Success) reply).state();
-        assertThat(state.getUtxos().get("tx10:0").status()).isEqualTo(UtxoStatus.AVAILABLE);
-        assertThat(state.getReservedBalanceSats()).isEqualTo(0);
-        assertThat(state.getConfirmedBalanceSats()).isEqualTo(30000);
+        assertThat(state.getUtxoEntries().get("tx10:0").status()).isEqualTo(UtxoStatus.AVAILABLE);
     }
 
     // 11. markUtxoSpent_succeeds
@@ -281,13 +278,12 @@ class WalletAggregateTest {
         WalletReply reply = probe.receiveMessage(TIMEOUT);
         assertThat(reply).isInstanceOf(WalletReply.Success.class);
         WalletState state = ((WalletReply.Success) reply).state();
-        assertThat(state.getUtxos().get("tx11:0").status()).isEqualTo(UtxoStatus.SPENT);
-        assertThat(state.getConfirmedBalanceSats()).isEqualTo(0);
+        assertThat(state.getUtxoEntries().get("tx11:0").status()).isEqualTo(UtxoStatus.SPENT);
     }
 
-    // 12. updateConfirmation_movesBalance
+    // 12. updateConfirmation_succeeds
     @Test
-    void updateConfirmation_movesBalance() {
+    void updateConfirmation_succeeds() {
         createWallet("wallet-12");
         TestProbe<WalletReply> probe = testKit.createTestProbe();
         BitcoinUtxo utxo = makeUtxo("tx12", 0, 45000, 0);
@@ -299,9 +295,6 @@ class WalletAggregateTest {
                 "wallet-12", "tx12", 6, 800000, probe.ref()));
         WalletReply reply = probe.receiveMessage(TIMEOUT);
         assertThat(reply).isInstanceOf(WalletReply.Success.class);
-        WalletState state = ((WalletReply.Success) reply).state();
-        assertThat(state.getUnconfirmedBalanceSats()).isEqualTo(0);
-        assertThat(state.getConfirmedBalanceSats()).isEqualTo(45000);
     }
 
     // 13. cleanupExpiredReservations_releasesExpired
@@ -325,9 +318,7 @@ class WalletAggregateTest {
         WalletReply reply = probe.receiveMessage(TIMEOUT);
         assertThat(reply).isInstanceOf(WalletReply.Success.class);
         WalletState state = ((WalletReply.Success) reply).state();
-        assertThat(state.getUtxos().get("tx13:0").status()).isEqualTo(UtxoStatus.AVAILABLE);
-        assertThat(state.getReservedBalanceSats()).isEqualTo(0);
-        assertThat(state.getConfirmedBalanceSats()).isEqualTo(55000);
+        assertThat(state.getUtxoEntries().get("tx13:0").status()).isEqualTo(UtxoStatus.AVAILABLE);
     }
 
     // 14. recovery_restoresState
@@ -335,7 +326,6 @@ class WalletAggregateTest {
     void recovery_restoresState() {
         String walletId = "wallet-14-recovery";
 
-        // Create wallet and add a UTXO via sharding
         TestProbe<WalletReply> probe = testKit.createTestProbe();
         walletRef(walletId).tell(new WalletCommand.CreateWalletCommand(
                 walletId, "Recovery Test", WalletType.HD, NetworkType.TESTNET,
@@ -351,8 +341,7 @@ class WalletAggregateTest {
         PersistenceId pid = PersistenceId.of(WalletAggregate.ENTITY_TYPE_KEY.name(), walletId);
         ActorRef<WalletCommand> recovered = testKit.spawn(WalletAggregate.create(pid));
 
-        // Query the recovered actor — use a no-op command that returns state
-        // We'll record a new address to get the state back
+        // Query the recovered actor
         AddressMetadata addr = makeAddress("tb1qrecovery", 0);
         recovered.tell(new WalletCommand.RecordAddressCommand(walletId, addr, probe.ref()));
         WalletReply reply = probe.receiveMessage(TIMEOUT);
@@ -360,7 +349,6 @@ class WalletAggregateTest {
         WalletState state = ((WalletReply.Success) reply).state();
         assertThat(state.isCreated()).isTrue();
         assertThat(state.getWalletId()).isEqualTo(walletId);
-        assertThat(state.getUtxos()).containsKey("txRecovery:0");
-        assertThat(state.getConfirmedBalanceSats()).isEqualTo(100000);
+        assertThat(state.getUtxoEntries()).containsKey("txRecovery:0");
     }
 }

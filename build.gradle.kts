@@ -45,6 +45,7 @@ dependencies {
     // Pekko Projections
     implementation("org.apache.pekko:pekko-projection-core_$scalaVersion:$pekkoProjectionVersion")
     implementation("org.apache.pekko:pekko-projection-jdbc_$scalaVersion:$pekkoProjectionVersion")
+    implementation("org.apache.pekko:pekko-projection-eventsourced_$scalaVersion:$pekkoProjectionVersion")
 
     // Micrometer (optional — compileOnly)
     compileOnly("io.micrometer:micrometer-core:1.13.0")
@@ -60,6 +61,7 @@ dependencies {
     testImplementation("org.testcontainers:junit-jupiter:1.19.7")
     testImplementation("org.postgresql:postgresql:42.7.3")
     testImplementation("com.fasterxml.jackson.module:jackson-module-parameter-names:2.17.3")
+    testImplementation("org.awaitility:awaitility:4.2.1")
 }
 
 tasks.test {

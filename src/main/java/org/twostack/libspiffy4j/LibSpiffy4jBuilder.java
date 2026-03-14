@@ -3,6 +3,7 @@ package org.twostack.libspiffy4j;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.typesafe.config.Config;
 import org.twostack.libspiffy4j.config.ActorSystemFactory;
+import org.twostack.libspiffy4j.projection.WalletProjectionSetup;
 
 import javax.sql.DataSource;
 
@@ -48,6 +49,7 @@ public final class LibSpiffy4jBuilder {
         String systemName = LibSpiffy4j.nextSystemName();
         var system = ActorSystemFactory.create(
                 systemName, dataSource, objectMapper, meterRegistry, configOverride);
+        WalletProjectionSetup.init(system);
         return new LibSpiffy4j(system);
     }
 }

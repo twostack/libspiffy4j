@@ -8,12 +8,12 @@ import org.apache.pekko.persistence.typed.javadsl.CommandHandlerBuilder;
 import org.apache.pekko.persistence.typed.javadsl.EventHandler;
 import org.apache.pekko.persistence.typed.javadsl.EventSourcedBehavior;
 import org.apache.pekko.persistence.typed.javadsl.RetentionCriteria;
-import org.twostack.libspiffy4j.model.BitcoinUtxo;
 import org.twostack.libspiffy4j.model.UtxoStatus;
 
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 public class WalletAggregate
         extends EventSourcedBehavior<WalletCommand, WalletEvent, WalletState> {
@@ -37,6 +37,11 @@ public class WalletAggregate
     @Override
     public RetentionCriteria retentionCriteria() {
         return RetentionCriteria.snapshotEvery(100, 2);
+    }
+
+    @Override
+    public Set<String> tagsFor(WalletEvent event) {
+        return Set.of("wallet");
     }
 
     @Override
@@ -90,7 +95,7 @@ public class WalletAggregate
 
     private org.apache.pekko.persistence.typed.javadsl.Effect<WalletEvent, WalletState> onRecordAddress(
             WalletState state, WalletCommand.RecordAddressCommand cmd) {
-        if (state.getAddresses().containsKey(cmd.addressMetadata().address())) {
+        if (state.getKnownAddresses().contains(cmd.addressMetadata().address())) {
             return Effect().reply(cmd.replyTo(), new WalletReply.Failure("Address already recorded"));
         }
         int derivationIndex = cmd.addressMetadata().derivationIndex() != null
@@ -104,7 +109,7 @@ public class WalletAggregate
 
     private org.apache.pekko.persistence.typed.javadsl.Effect<WalletEvent, WalletState> onRecordUtxo(
             WalletState state, WalletCommand.RecordUtxoCommand cmd) {
-        if (state.getUtxos().containsKey(cmd.utxo().key())) {
+        if (state.getUtxoEntries().containsKey(cmd.utxo().key())) {
             return Effect().reply(cmd.replyTo(), new WalletReply.Failure("UTXO already recorded"));
         }
         var event = new WalletEvent.UtxoReceivedEvent(cmd.walletId(), cmd.utxo(), Instant.now());
@@ -114,7 +119,7 @@ public class WalletAggregate
 
     private org.apache.pekko.persistence.typed.javadsl.Effect<WalletEvent, WalletState> onRecordTransaction(
             WalletState state, WalletCommand.RecordTransactionCommand cmd) {
-        if (state.getTransactions().containsKey(cmd.transaction().txid())) {
+        if (state.getKnownTxids().contains(cmd.transaction().txid())) {
             return Effect().reply(cmd.replyTo(), new WalletReply.Failure("Transaction already recorded"));
         }
         var event = new WalletEvent.TransactionRecordedEvent(cmd.walletId(), cmd.transaction(), Instant.now());
@@ -124,11 +129,15 @@ public class WalletAggregate
 
     private org.apache.pekko.persistence.typed.javadsl.Effect<WalletEvent, WalletState> onReserveUtxo(
             WalletState state, WalletCommand.ReserveUtxoCommand cmd) {
-        BitcoinUtxo utxo = state.getUtxos().get(cmd.utxoKey());
-        if (utxo == null) {
+        WalletState.UtxoEntry entry = state.getUtxoEntries().get(cmd.utxoKey());
+        if (entry == null) {
             return Effect().reply(cmd.replyTo(), new WalletReply.Failure("UTXO not found"));
         }
-        if (!utxo.isEffectivelyAvailable()) {
+        boolean effectivelyAvailable = entry.status() == UtxoStatus.AVAILABLE
+                || (entry.status() == UtxoStatus.RESERVED
+                    && entry.reservationExpiresAt() != null
+                    && Instant.now().isAfter(entry.reservationExpiresAt()));
+        if (!effectivelyAvailable) {
             return Effect().reply(cmd.replyTo(), new WalletReply.Failure("UTXO is not available"));
         }
         var event = new WalletEvent.UtxoReservedEvent(
@@ -140,11 +149,11 @@ public class WalletAggregate
 
     private org.apache.pekko.persistence.typed.javadsl.Effect<WalletEvent, WalletState> onReleaseUtxo(
             WalletState state, WalletCommand.ReleaseUtxoCommand cmd) {
-        BitcoinUtxo utxo = state.getUtxos().get(cmd.utxoKey());
-        if (utxo == null) {
+        WalletState.UtxoEntry entry = state.getUtxoEntries().get(cmd.utxoKey());
+        if (entry == null) {
             return Effect().reply(cmd.replyTo(), new WalletReply.Failure("UTXO not found"));
         }
-        if (utxo.status() != UtxoStatus.RESERVED) {
+        if (entry.status() != UtxoStatus.RESERVED) {
             return Effect().reply(cmd.replyTo(), new WalletReply.Failure("UTXO is not reserved"));
         }
         var event = new WalletEvent.UtxoReleasedEvent(cmd.walletId(), cmd.utxoKey(), Instant.now());
@@ -154,11 +163,11 @@ public class WalletAggregate
 
     private org.apache.pekko.persistence.typed.javadsl.Effect<WalletEvent, WalletState> onMarkUtxoSpent(
             WalletState state, WalletCommand.MarkUtxoSpentCommand cmd) {
-        BitcoinUtxo utxo = state.getUtxos().get(cmd.utxoKey());
-        if (utxo == null) {
+        WalletState.UtxoEntry entry = state.getUtxoEntries().get(cmd.utxoKey());
+        if (entry == null) {
             return Effect().reply(cmd.replyTo(), new WalletReply.Failure("UTXO not found"));
         }
-        if (utxo.status() == UtxoStatus.SPENT) {
+        if (entry.status() == UtxoStatus.SPENT) {
             return Effect().reply(cmd.replyTo(), new WalletReply.Failure("UTXO already spent"));
         }
         var event = new WalletEvent.UtxoSpentEvent(cmd.walletId(), cmd.utxoKey(), Instant.now());
@@ -171,7 +180,7 @@ public class WalletAggregate
         List<WalletEvent> events = new ArrayList<>();
         events.add(new WalletEvent.UtxoConfirmationUpdatedEvent(
                 cmd.walletId(), cmd.txid(), cmd.confirmations(), cmd.blockHeight(), Instant.now()));
-        if (state.getTransactions().containsKey(cmd.txid())) {
+        if (state.getKnownTxids().contains(cmd.txid())) {
             events.add(new WalletEvent.TransactionConfirmedEvent(
                     cmd.walletId(), cmd.txid(), cmd.confirmations(), cmd.blockHeight(), Instant.now()));
         }
@@ -183,9 +192,12 @@ public class WalletAggregate
             WalletState state, WalletCommand.CleanupExpiredReservationsCommand cmd) {
         List<WalletEvent> events = new ArrayList<>();
         Instant now = Instant.now();
-        for (BitcoinUtxo utxo : state.getUtxos().values()) {
-            if (utxo.status() == UtxoStatus.RESERVED && utxo.isReservationExpired()) {
-                events.add(new WalletEvent.UtxoReleasedEvent(cmd.walletId(), utxo.key(), now));
+        for (var mapEntry : state.getUtxoEntries().entrySet()) {
+            WalletState.UtxoEntry entry = mapEntry.getValue();
+            if (entry.status() == UtxoStatus.RESERVED
+                    && entry.reservationExpiresAt() != null
+                    && now.isAfter(entry.reservationExpiresAt())) {
+                events.add(new WalletEvent.UtxoReleasedEvent(cmd.walletId(), mapEntry.getKey(), now));
             }
         }
         if (events.isEmpty()) {

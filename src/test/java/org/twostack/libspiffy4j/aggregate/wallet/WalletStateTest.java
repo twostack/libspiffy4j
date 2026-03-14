@@ -29,104 +29,61 @@ class WalletStateTest {
     }
 
     @Test
-    void receiveConfirmedUtxo_updatesConfirmedBalance() {
+    void walletCreated_setsFields() {
+        assertThat(state.isCreated()).isTrue();
+        assertThat(state.getWalletId()).isEqualTo("w1");
+        assertThat(state.getName()).isEqualTo("Test");
+        assertThat(state.getNetworkType()).isEqualTo(NetworkType.TESTNET);
+        assertThat(state.getWalletType()).isEqualTo(WalletType.HD);
+        assertThat(state.getVersion()).isEqualTo(1);
+    }
+
+    @Test
+    void receiveUtxo_addsEntry() {
         state.applyUtxoReceived(new WalletEvent.UtxoReceivedEvent(
                 "w1", makeUtxo("tx1", 0, 50000, 6), Instant.now()));
-        assertThat(state.getConfirmedBalanceSats()).isEqualTo(50000);
-        assertThat(state.getUnconfirmedBalanceSats()).isEqualTo(0);
+        assertThat(state.getUtxoEntries()).containsKey("tx1:0");
+        assertThat(state.getUtxoEntries().get("tx1:0").valueSats()).isEqualTo(50000);
+        assertThat(state.getUtxoEntries().get("tx1:0").status()).isEqualTo(UtxoStatus.AVAILABLE);
     }
 
     @Test
-    void receiveUnconfirmedUtxo_updatesUnconfirmedBalance() {
+    void receiveUtxo_tracksMinimalInfo() {
         state.applyUtxoReceived(new WalletEvent.UtxoReceivedEvent(
                 "w1", makeUtxo("tx1", 0, 30000, 0), Instant.now()));
-        assertThat(state.getUnconfirmedBalanceSats()).isEqualTo(30000);
-        assertThat(state.getConfirmedBalanceSats()).isEqualTo(0);
+        WalletState.UtxoEntry entry = state.getUtxoEntries().get("tx1:0");
+        assertThat(entry.txid()).isEqualTo("tx1");
+        assertThat(entry.valueSats()).isEqualTo(30000);
+        assertThat(entry.reservationExpiresAt()).isNull();
     }
 
     @Test
-    void receiveUtxoWithNullConfirmations_treatedAsUnconfirmed() {
-        state.applyUtxoReceived(new WalletEvent.UtxoReceivedEvent(
-                "w1", makeUtxo("tx1", 0, 20000, null), Instant.now()));
-        assertThat(state.getUnconfirmedBalanceSats()).isEqualTo(20000);
-        assertThat(state.getConfirmedBalanceSats()).isEqualTo(0);
-    }
-
-    @Test
-    void reserveUtxo_movesFromConfirmedToReserved() {
+    void reserveUtxo_updatesStatusAndExpiry() {
         state.applyUtxoReceived(new WalletEvent.UtxoReceivedEvent(
                 "w1", makeUtxo("tx1", 0, 50000, 3), Instant.now()));
 
+        Instant expiresAt = Instant.now().plusSeconds(3600);
         state.applyUtxoReserved(new WalletEvent.UtxoReservedEvent(
-                "w1", "tx1:0", "spending-tx", Instant.now().plusSeconds(3600),
+                "w1", "tx1:0", "spending-tx", expiresAt,
                 1, "payment", Instant.now()));
 
-        assertThat(state.getConfirmedBalanceSats()).isEqualTo(0);
-        assertThat(state.getReservedBalanceSats()).isEqualTo(50000);
+        WalletState.UtxoEntry entry = state.getUtxoEntries().get("tx1:0");
+        assertThat(entry.status()).isEqualTo(UtxoStatus.RESERVED);
+        assertThat(entry.reservationExpiresAt()).isEqualTo(expiresAt);
     }
 
     @Test
-    void reserveUtxo_movesFromUnconfirmedToReserved() {
-        state.applyUtxoReceived(new WalletEvent.UtxoReceivedEvent(
-                "w1", makeUtxo("tx1", 0, 25000, 0), Instant.now()));
-
-        state.applyUtxoReserved(new WalletEvent.UtxoReservedEvent(
-                "w1", "tx1:0", "spending-tx", Instant.now().plusSeconds(3600),
-                1, "payment", Instant.now()));
-
-        assertThat(state.getUnconfirmedBalanceSats()).isEqualTo(0);
-        assertThat(state.getReservedBalanceSats()).isEqualTo(25000);
-    }
-
-    @Test
-    void spendReservedUtxo_decreasesReservedBalance() {
+    void spendUtxo_marksSpent() {
         state.applyUtxoReceived(new WalletEvent.UtxoReceivedEvent(
                 "w1", makeUtxo("tx1", 0, 40000, 3), Instant.now()));
 
-        state.applyUtxoReserved(new WalletEvent.UtxoReservedEvent(
-                "w1", "tx1:0", "spending-tx", Instant.now().plusSeconds(3600),
-                1, "payment", Instant.now()));
-
         state.applyUtxoSpent(new WalletEvent.UtxoSpentEvent("w1", "tx1:0", Instant.now()));
 
-        assertThat(state.getReservedBalanceSats()).isEqualTo(0);
-        assertThat(state.getConfirmedBalanceSats()).isEqualTo(0);
-        assertThat(state.getUtxos().get("tx1:0").status()).isEqualTo(UtxoStatus.SPENT);
+        assertThat(state.getUtxoEntries().get("tx1:0").status()).isEqualTo(UtxoStatus.SPENT);
     }
 
     @Test
-    void confirmationUpdate_skipsReservedUtxos() {
-        // Add unconfirmed UTXO then reserve it
-        state.applyUtxoReceived(new WalletEvent.UtxoReceivedEvent(
-                "w1", makeUtxo("tx1", 0, 35000, 0), Instant.now()));
-
-        state.applyUtxoReserved(new WalletEvent.UtxoReservedEvent(
-                "w1", "tx1:0", "spending-tx", Instant.now().plusSeconds(3600),
-                1, "payment", Instant.now()));
-
-        // Now confirm it — should NOT move from reserved to confirmed
-        state.applyUtxoConfirmationUpdated(new WalletEvent.UtxoConfirmationUpdatedEvent(
-                "w1", "tx1", 6, 800000, Instant.now()));
-
-        assertThat(state.getReservedBalanceSats()).isEqualTo(35000);
-        assertThat(state.getConfirmedBalanceSats()).isEqualTo(0);
-        assertThat(state.getUnconfirmedBalanceSats()).isEqualTo(0);
-    }
-
-    @Test
-    void confirmationUpdate_movesUnconfirmedToConfirmed() {
-        state.applyUtxoReceived(new WalletEvent.UtxoReceivedEvent(
-                "w1", makeUtxo("tx1", 0, 60000, 0), Instant.now()));
-
-        state.applyUtxoConfirmationUpdated(new WalletEvent.UtxoConfirmationUpdatedEvent(
-                "w1", "tx1", 3, 800000, Instant.now()));
-
-        assertThat(state.getUnconfirmedBalanceSats()).isEqualTo(0);
-        assertThat(state.getConfirmedBalanceSats()).isEqualTo(60000);
-    }
-
-    @Test
-    void releaseUtxo_movesReservedBackToConfirmed() {
+    void releaseUtxo_restoresAvailable() {
         state.applyUtxoReceived(new WalletEvent.UtxoReceivedEvent(
                 "w1", makeUtxo("tx1", 0, 45000, 5), Instant.now()));
 
@@ -136,12 +93,23 @@ class WalletStateTest {
 
         state.applyUtxoReleased(new WalletEvent.UtxoReleasedEvent("w1", "tx1:0", Instant.now()));
 
-        assertThat(state.getReservedBalanceSats()).isEqualTo(0);
-        assertThat(state.getConfirmedBalanceSats()).isEqualTo(45000);
+        WalletState.UtxoEntry entry = state.getUtxoEntries().get("tx1:0");
+        assertThat(entry.status()).isEqualTo(UtxoStatus.AVAILABLE);
+        assertThat(entry.reservationExpiresAt()).isNull();
     }
 
     @Test
-    void transactionRecordedAndConfirmed() {
+    void addressRecorded_addsToKnownSet() {
+        AddressMetadata addr = new AddressMetadata("tb1qaddr1", BitcoinScriptType.P2PKH,
+                "m/44'/0'/0'/0/0", 0, false, null, null, null, null, 0, 0, Instant.now(), false);
+        state.applyAddressRecorded(new WalletEvent.AddressRecordedEvent("w1", addr, 0, Instant.now()));
+
+        assertThat(state.getKnownAddresses()).contains("tb1qaddr1");
+        assertThat(state.getNextDerivationIndex()).isEqualTo(1);
+    }
+
+    @Test
+    void transactionRecorded_addsToKnownTxids() {
         BitcoinTransaction tx = new BitcoinTransaction(
                 "w1", "txABC", "rawhex",
                 TransactionStatus.BROADCAST, TransactionDirection.INCOMING,
@@ -149,12 +117,32 @@ class WalletStateTest {
                 java.util.List.of(), java.util.List.of(), Instant.now(), Instant.now(), null, 0, 2);
 
         state.applyTransactionRecorded(new WalletEvent.TransactionRecordedEvent("w1", tx, Instant.now()));
-        assertThat(state.getTransactions()).containsKey("txABC");
-        assertThat(state.getTransactions().get("txABC").status()).isEqualTo(TransactionStatus.BROADCAST);
+        assertThat(state.getKnownTxids()).contains("txABC");
+    }
 
+    @Test
+    void transactionConfirmed_incrementsVersion() {
+        BitcoinTransaction tx = new BitcoinTransaction(
+                "w1", "txABC", "rawhex",
+                TransactionStatus.BROADCAST, TransactionDirection.INCOMING,
+                null, 0, 0, 50000, 1000, 49000,
+                java.util.List.of(), java.util.List.of(), Instant.now(), Instant.now(), null, 0, 2);
+
+        state.applyTransactionRecorded(new WalletEvent.TransactionRecordedEvent("w1", tx, Instant.now()));
+        long versionBefore = state.getVersion();
         state.applyTransactionConfirmed(new WalletEvent.TransactionConfirmedEvent(
                 "w1", "txABC", 6, 800000, Instant.now()));
-        assertThat(state.getTransactions().get("txABC").status()).isEqualTo(TransactionStatus.CONFIRMED);
-        assertThat(state.getTransactions().get("txABC").confirmations()).isEqualTo(6);
+        assertThat(state.getVersion()).isEqualTo(versionBefore + 1);
+    }
+
+    @Test
+    void confirmationUpdate_incrementsVersion() {
+        state.applyUtxoReceived(new WalletEvent.UtxoReceivedEvent(
+                "w1", makeUtxo("tx1", 0, 60000, 0), Instant.now()));
+
+        long versionBefore = state.getVersion();
+        state.applyUtxoConfirmationUpdated(new WalletEvent.UtxoConfirmationUpdatedEvent(
+                "w1", "tx1", 3, 800000, Instant.now()));
+        assertThat(state.getVersion()).isEqualTo(versionBefore + 1);
     }
 }
