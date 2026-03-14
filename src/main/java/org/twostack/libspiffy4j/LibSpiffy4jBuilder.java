@@ -3,6 +3,7 @@ package org.twostack.libspiffy4j;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.typesafe.config.Config;
 import org.twostack.libspiffy4j.config.ActorSystemFactory;
+import org.twostack.libspiffy4j.projection.InvoiceProjectionSetup;
 import org.twostack.libspiffy4j.projection.WalletProjectionSetup;
 import org.twostack.libspiffy4j.service.CryptoService;
 import org.twostack.libspiffy4j.service.EncryptionService;
@@ -66,6 +67,7 @@ public final class LibSpiffy4jBuilder {
         var system = ActorSystemFactory.create(
                 systemName, dataSource, objectMapper, meterRegistry, configOverride);
         WalletProjectionSetup.init(system);
+        InvoiceProjectionSetup.init(system);
 
         CryptoService cryptoService = new CryptoService();
         EncryptionService encryptionService = encryptionMasterKey != null
