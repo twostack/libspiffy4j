@@ -277,11 +277,11 @@ The critical design rule: **nothing outside the library holds a reference to the
 
 ```
                     ┌───────────────────────────────┐
-                    │         LibSpiffy4j            │
+                    │         LibSpiffy4j           │
  Command ─────────► │                               │ ─────► Result
                     │  ┌──────────────────────────┐ │
-                    │  │   Pekko Cluster Sharding  │ │
-                    │  │   (local mode)            │ │
+                    │  │   Pekko Cluster Sharding │ │
+                    │  │   (local mode)           │ │
                     │  │  ┌─────┐ ┌─────┐ ┌─────┐ │ │
                     │  │  │ W-1 │ │ W-2 │ │ W-N │ │ │  (internal, unreachable)
                     │  │  └─────┘ └─────┘ └─────┘ │ │
@@ -713,7 +713,7 @@ src/main/resources/
 
   Host provides at runtime:
   ┌────────────┐ ┌──────────────┐ ┌────────────┐
-  │ DataSource │ │ MeterRegistry│ │  Flyway /   │
+  │ DataSource │ │ MeterRegistry│ │  Flyway /  │
   │ (Agroal,   │ │ (optional)   │ │ Liquibase  │
   │  HikariCP, │ │              │ │ (host-run) │
   │  etc.)     │ │              │ │            │
