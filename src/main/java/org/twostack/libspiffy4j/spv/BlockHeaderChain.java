@@ -7,7 +7,7 @@ import java.util.Map;
  * In-memory store of block headers, limited to {@link #MAX_HEADERS} entries.
  * Supports lookup by height or hash and basic continuity validation.
  */
-public final class BlockHeaderChain {
+public final class BlockHeaderChain implements BlockHeaderStore {
 
     public static final int MAX_HEADERS = 2016;
 

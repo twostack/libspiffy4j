@@ -63,6 +63,7 @@ dependencies {
     testImplementation("org.postgresql:postgresql:42.7.3")
     testImplementation("com.fasterxml.jackson.module:jackson-module-parameter-names:2.17.3")
     testImplementation("org.awaitility:awaitility:4.2.1")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
 
 tasks.test {
