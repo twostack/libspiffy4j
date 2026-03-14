@@ -398,69 +398,70 @@ spiffy.secureStorage();        // always available
 
 ---
 
-## Phase 6 — Transaction Building
+## Phase 6 — Transaction Building **COMPLETE** (2026-03-14)
 
 **Goal**: UTXO selection, fee calculation, transaction construction, signing, and BEEF output — matching Dart `TransactionBuilderService`.
 
-### 6.1 TransactionBuildService
+### 6.1 CoinSelector (stateless)
 
-| Method | Detail |
-|---|---|
-| `buildTransaction(walletId, outputs, config)` | Select UTXOs → build transaction → return `TransactionBuildResult` |
-| `selectUtxos(available, targetAmount, config)` | Coin selection per strategy |
-| `calculateFee(inputCount, outputCount, feePerKb)` | Size-based fee estimation |
+| Deliverable | Status | Detail |
+|---|---|---|
+| `CoinSelector` | DONE | Stateless class. Inner record `CoinSelectionResult(selected, totalSelected, change)`. Public `select(List<BitcoinUtxo>, targetSats, UtxoSelectionStrategy)` dispatches to per-strategy methods. Throws `IllegalArgumentException` on insufficient funds. |
+| `SMALLEST_FIRST` | DONE | Sort ascending by valueSats, accumulate |
+| `LARGEST_FIRST` | DONE | Sort descending by valueSats, accumulate |
+| `RANDOM` | DONE | Shuffle, accumulate |
+| `OPTIMAL_CHANGE` | DONE | Try exact match within dust threshold (546 sats), then branch-and-bound (100k iterations max, suffix-sum pruning), fallback to LARGEST_FIRST |
 
-### 6.2 Coin Selection Strategies
+### 6.2 TransactionBuildService
 
-| Strategy | Algorithm |
-|---|---|
-| `SMALLEST_FIRST` | Sort ascending, accumulate until target met |
-| `LARGEST_FIRST` | Sort descending, accumulate until target met |
-| `RANDOM` | Shuffle, accumulate until target met |
-| `OPTIMAL_CHANGE` | Minimize change output — prefer exact or near-exact matches |
+| Deliverable | Status | Detail |
+|---|---|---|
+| `TransactionBuildResult` record | DONE | `txid`, `rawHex`, `signed`, `selectedUtxos`, `totalInputSats`, `totalOutputSats`, `feeSats`, `changeSats`, `changeAddress` (nullable), `inputCount`, `outputCount` |
+| `TransactionBuildService` | DONE | Constructor takes `CryptoService`, creates internal `CoinSelector`. Stateless — UTXOs passed as params, no DataSource dependency |
+| `buildTransaction(available, outputs, config, changeAddress, signingKey, networkType)` | DONE | Iterative fee estimation (max 3 rounds): sum outputs → estimate fee → select coins → recalculate with actual input count → build via bitcoin4j `TransactionBuilder`. Null `signingKey` produces unsigned transaction. |
+| `calculateFee(inputCount, outputCount, feePerKb)` | DONE | Size-based: `(TX_OVERHEAD + inputs×148 + outputs×34) × feePerKb / 1000` |
+| Output mapping | DONE | `P2PKHOutputSpec` → `P2PKHLockBuilder`, `P2MSOutputSpec` → `P2MSLockBuilder` (mutable list for key sorting), `OPReturnOutputSpec` → `UnspendableDataLockBuilder` |
+| RBF support | DONE | Sequence `0xFFFFFFFE` when `enableRBF=true`, else `0xFFFFFFFF` |
+| Dust handling | DONE | Change below `minChangeAmountSats` absorbed into fee unless `forceChange=true`. OP_RETURN outputs bypass bitcoin4j dust checks |
+| Sighash | DONE | `SigHashType.ALL \| SigHashType.FORKID` (BSV standard, 0x41) |
 
-### 6.3 Transaction Build Flow
+### 6.3 MultisigTransactionService
 
-1. Query `WalletReadModelStorage.getAvailableUtxos(walletId)`
-2. Select UTXOs per strategy (target = sum of outputs + estimated fee)
-3. Reserve selected UTXOs via `ReserveUtxos` command
-4. Build transaction via bitcoin4j `TransactionBuilder`
-   - Add inputs (P2PKH unlock from selected UTXOs)
-   - Add outputs (per output specs: P2PKH, P2MS, OP_RETURN)
-   - Add change output if remainder > `minChangeAmount` (546 sats)
-   - Dust prevention: outputs below dust threshold are folded into fee
-5. Sign inputs using `CryptoService` (skip for watch-only wallets)
-6. Return `TransactionBuildResult` with hex, fee breakdown, BEEF (if merkle proofs available)
+| Deliverable | Status | Detail |
+|---|---|---|
+| `MultisigTransactionService` | DONE | Constructor takes `TransactionBuildService`. Delegates transaction building. |
+| `buildFundingTransaction(clientPubKeyHex, serverPubKeyHex, amountSats, available, config, changeAddress, signingKey, networkType)` | DONE | Creates `P2MSOutputSpec` (2-of-2) and delegates to `TransactionBuildService.buildTransaction` |
+| `signMultisigInput(rawTx, inputIndex, privateKey, inputAmountSats)` | DONE | Parses raw tx, computes sighash via `SigHash.createHash`, signs with ECDSA, returns DER-encoded signature with sighash byte |
 
-### 6.4 Multisig Support
+### 6.4 UtxoSplitService
 
-| Method | Detail |
-|---|---|
-| `buildFundingTransaction(clientPubKey, serverPubKey, amount, utxos)` | 2-of-2 multisig output for payment channels |
-| `signMultisigInput(tx, inputIndex, privateKey, redeemScript)` | ECDSA signature for multisig input |
+| Deliverable | Status | Detail |
+|---|---|---|
+| `UtxoSplitService` | DONE | Stateless. Benford first-digit distribution: `{0.301, 0.176, 0.125, 0.097, 0.079, 0.067, 0.058, 0.051, 0.046}` |
+| `generateBenfordSplit(totalSats, targetAddresses, minOutputSats)` | DONE | Returns `List<P2PKHOutputSpec>`. Distributes proportionally by Benford weights, enforces minimum output, adjusts rounding on first (largest) output. Output count = address count. |
 
-### 6.5 UTXO Splitting (Benford Distribution)
+### 6.5 LibSpiffy4j Wiring
 
-| Method | Detail |
-|---|---|
-| `splitUtxosToBenford(walletId, utxos)` | Splits large UTXOs into Benford-distributed amounts for privacy |
+| Deliverable | Status | Detail |
+|---|---|---|
+| `LibSpiffy4j` | DONE | Added `transactionBuildService()`, `multisigTransactionService()`, `utxoSplitService()` accessors |
+| `LibSpiffy4jBuilder` | DONE | Instantiates `TransactionBuildService(cryptoService)`, `MultisigTransactionService(txBuildService)`, `UtxoSplitService()` in `build()` |
 
 ### 6.6 Tests
 
-| Test | Validates |
-|---|---|
-| `CoinSelectionTest` | Each strategy selects correct UTXOs. Edge cases: exact match, insufficient funds, dust handling |
-| `FeeCalculationTest` | Fee scales with input/output count. Minimum fee respected. |
-| `TransactionBuildTest` | End-to-end: UTXOs → signed transaction → valid hex. Change output generated correctly. |
-| `MultisigBuildTest` | 2-of-2 funding transaction valid. Both signatures verify. |
-| `DustPreventionTest` | Outputs below dust threshold handled correctly (folded into fee or rejected) |
-| `ReservationIntegrationTest` | Build reserves UTXOs. Cancellation releases them. |
+| Test | Status | Validates |
+|---|---|---|
+| `CoinSelectorTest` (11 tests) | DONE | All 4 strategies, exact match, insufficient funds, empty/null list, negative target, all UTXOs needed, OPTIMAL_CHANGE prefers minimal change |
+| `TransactionBuildServiceTest` (10 tests) | DONE | Single P2PKH, multiple outputs, OP_RETURN, P2MS, change generation, dust absorbed into fee, unsigned tx (null key), fee calculation (1-in/1-out, 3-in/2-out), insufficient funds |
+| `MultisigTransactionServiceTest` (2 tests) | DONE | 2-of-2 funding tx creates valid signed transaction, multisig input signing produces valid DER signature |
+| `UtxoSplitServiceTest` (9 tests) | DONE | Sum equals total, output count matches addresses, min output enforced, addresses preserved, single address, empty addresses rejected, insufficient for min outputs, Benford distribution pattern (first > last), zero total rejected |
 
-### 6.6 Exit Criteria
+### 6.7 Design Decisions
 
-- Transaction hex accepted by bitcoin4j script interpreter
-- Fee calculation matches Dart implementation
-- UTXO reservation integrated with build flow (reserve on build, release on cancel)
+- **No aggregate interaction**: Services return `TransactionBuildResult` with `selectedUtxos` so the caller can issue Reserve/MarkSpent commands
+- **Stateless services**: All receive UTXOs as params — no DataSource, no wallet lookup
+- **Signing key per-call**: Caller handles decryption from SecureStorage
+- **BEEF output**: Deferred — requires merkle proof infrastructure (Phase 8+)
 
 ---
 
@@ -936,13 +937,13 @@ Legend:  ◄───── depends on                                 │   │
 | AES-256-GCM key encryption | Phase 5 | Bouncy Castle |
 | HKDF key derivation | Phase 5 | |
 | Transaction signing | Phase 5 | Via bitcoin4j |
-| Coin selection (4 strategies) | Phase 6 | |
-| Fee calculation | Phase 6 | |
-| Transaction building with change | Phase 6 | Via bitcoin4j |
-| Dust prevention | Phase 6 | |
-| Multisig transaction building | Phase 6 | 2-of-2 for channels |
-| UTXO Benford splitting | Phase 6 | |
-| BEEF output | Phase 6 | |
+| Coin selection (4 strategies) | Phase 6 | DONE |
+| Fee calculation | Phase 6 | DONE |
+| Transaction building with change | Phase 6 | DONE — via bitcoin4j |
+| Dust prevention | Phase 6 | DONE |
+| Multisig transaction building | Phase 6 | DONE — 2-of-2 for channels |
+| UTXO Benford splitting | Phase 6 | DONE |
+| BEEF output | Phase 6 | Deferred — needs merkle proofs |
 | Invoice creation with expiration | Phase 7 | |
 | Multi-output invoices (P2PKH, P2MS, OP_RETURN) | Phase 7 | |
 | Invoice status lifecycle | Phase 7 | |

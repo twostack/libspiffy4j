@@ -6,6 +6,9 @@ import org.twostack.libspiffy4j.config.ActorSystemFactory;
 import org.twostack.libspiffy4j.projection.WalletProjectionSetup;
 import org.twostack.libspiffy4j.service.CryptoService;
 import org.twostack.libspiffy4j.service.EncryptionService;
+import org.twostack.libspiffy4j.service.MultisigTransactionService;
+import org.twostack.libspiffy4j.service.TransactionBuildService;
+import org.twostack.libspiffy4j.service.UtxoSplitService;
 import org.twostack.libspiffy4j.storage.postgres.SecureStorage;
 
 import javax.sql.DataSource;
@@ -70,6 +73,11 @@ public final class LibSpiffy4jBuilder {
                 : null;
         SecureStorage secureStorage = new SecureStorage();
 
-        return new LibSpiffy4j(system, cryptoService, encryptionService, secureStorage);
+        TransactionBuildService transactionBuildService = new TransactionBuildService(cryptoService);
+        MultisigTransactionService multisigTransactionService = new MultisigTransactionService(transactionBuildService);
+        UtxoSplitService utxoSplitService = new UtxoSplitService();
+
+        return new LibSpiffy4j(system, cryptoService, encryptionService, secureStorage,
+                transactionBuildService, multisigTransactionService, utxoSplitService);
     }
 }

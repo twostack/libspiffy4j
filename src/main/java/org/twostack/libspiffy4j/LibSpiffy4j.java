@@ -4,6 +4,9 @@ import org.apache.pekko.actor.typed.ActorSystem;
 import org.twostack.libspiffy4j.config.DataSourceRegistry;
 import org.twostack.libspiffy4j.service.CryptoService;
 import org.twostack.libspiffy4j.service.EncryptionService;
+import org.twostack.libspiffy4j.service.MultisigTransactionService;
+import org.twostack.libspiffy4j.service.TransactionBuildService;
+import org.twostack.libspiffy4j.service.UtxoSplitService;
 import org.twostack.libspiffy4j.storage.postgres.SecureStorage;
 
 import java.util.concurrent.TimeUnit;
@@ -23,6 +26,9 @@ public final class LibSpiffy4j implements AutoCloseable {
     private final CryptoService cryptoService;
     private final EncryptionService encryptionService;
     private final SecureStorage secureStorage;
+    private final TransactionBuildService transactionBuildService;
+    private final MultisigTransactionService multisigTransactionService;
+    private final UtxoSplitService utxoSplitService;
     private volatile boolean closed;
 
     static String nextSystemName() {
@@ -30,12 +36,18 @@ public final class LibSpiffy4j implements AutoCloseable {
     }
 
     LibSpiffy4j(ActorSystem<Void> system, CryptoService cryptoService,
-                EncryptionService encryptionService, SecureStorage secureStorage) {
+                EncryptionService encryptionService, SecureStorage secureStorage,
+                TransactionBuildService transactionBuildService,
+                MultisigTransactionService multisigTransactionService,
+                UtxoSplitService utxoSplitService) {
         this.system = system;
         this.systemName = system.name();
         this.cryptoService = cryptoService;
         this.encryptionService = encryptionService;
         this.secureStorage = secureStorage;
+        this.transactionBuildService = transactionBuildService;
+        this.multisigTransactionService = multisigTransactionService;
+        this.utxoSplitService = utxoSplitService;
     }
 
     public static LibSpiffy4jBuilder builder() {
@@ -59,6 +71,18 @@ public final class LibSpiffy4j implements AutoCloseable {
 
     public SecureStorage secureStorage() {
         return secureStorage;
+    }
+
+    public TransactionBuildService transactionBuildService() {
+        return transactionBuildService;
+    }
+
+    public MultisigTransactionService multisigTransactionService() {
+        return multisigTransactionService;
+    }
+
+    public UtxoSplitService utxoSplitService() {
+        return utxoSplitService;
     }
 
     @Override
