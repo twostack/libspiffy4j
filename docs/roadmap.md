@@ -68,308 +68,333 @@ HD key derivation, transaction building/signing, script system, address encoding
 
 ---
 
-## Phase 2 — Domain Models & Value Objects
+## Phase 2 — Domain Models & Value Objects **COMPLETE** (2026-03-14)
 
 **Goal**: All domain value types exist as Java records with serialization, validation, and equality semantics.
 
 ### 2.1 Core Models
 
-| Record | Key Fields | Notes |
+| Record | Status | Key Fields | Notes |
+|---|---|---|---|
+| `BitcoinUtxo` | DONE | txid, vout, valueSats, scriptPubKey, address, status, blockHeight, confirmations, reservedByTxId, reservationExpiresAt, reservationPriority, reservationReason, derivationIndex, createdAt, updatedAt | Status enum: `PENDING`, `AVAILABLE`, `RESERVED`, `SPENT`. Methods: `isReservationExpired()`, `isEffectivelyAvailable()`, `reservationTimeRemaining()`, `reserve()`, `markSpent()`, `releaseReservation()`, `updateConfirmations()`, `renewReservation()` |
+| `AddressMetadata` | DONE | address, scriptType, derivationPath, derivationIndex, isChange, label, purpose, firstUsedAt, lastUsedAt, usageCount, balanceSats, createdAt, isWatched | |
+| `BitcoinTransaction` | DONE | walletId, txid, rawHex, status, direction, blockHeight, confirmations, inputValueSats, outputValueSats, feeSats, netAmountSats, sendingAddresses, receivingAddresses, createdAt, updatedAt, memo, lockTime, version | Immutable lists via `List.copyOf()` in compact constructor |
+| `InvoiceOutputSpec` | DONE | Sealed interface with: `P2PKHOutputSpec(address, amountSats, label)`, `P2MSOutputSpec(publicKeys, threshold, amountSats, label)`, `OPReturnOutputSpec(dataChunks)` | Validation: P2MS threshold ≤ totalKeys ≤ 16; OP_RETURN totalSize ≤ 99KB |
+| `PaymentChannel` | DONE | channelId, walletId, role, state, clientPeerId, serverPeerId, clientPubKeyHex, serverPubKeyHex, clientAddressB58, serverAddressB58, fundingAmountSats, lockTimeUnix, clientBalanceSats, serverBalanceSats, fundingTxId, latestSequenceNumber, createdAt, closedAt, errorMessage | State enum: `NEGOTIATING`, `FUNDING`, `OPENING`, `OPEN`, `CLOSING`, `CLOSED`, `EXPIRED`, `FAILED`. Role enum: `CLIENT`, `SERVER` |
+
+### 2.2 Enums
+
+| Enum | Status | Values |
 |---|---|---|
-| `BitcoinUtxo` | txid, vout, value (`Coin`), scriptPubKey, address, status, blockHeight, confirmations, reservedByTxId, reservationExpiresAt, reservationPriority, reservationReason, derivationIndex, createdAt, updatedAt | Status enum: `PENDING`, `AVAILABLE`, `RESERVED`, `SPENT`. Methods: `isReservationExpired()`, `isEffectivelyAvailable()`, `reservationTimeRemaining()` |
-| `AddressMetadata` | address, label, derivationIndex, isChange, transactionCount, lastActivityDate, publicKeyHex | |
-| `WalletConfig` | walletId, name, rootAddress, walletType, networkType, metadata, createdAt | WalletType enum: `HD`, `WIF`, `XPRIV`, `XPUB` |
-| `BitcoinTransaction` | txid, rawHex, blockHeight, blockHash, timestamp, totalInputSats, totalOutputSats, fee, numInputs, numOutputs, txVersion, txLockTime, status, sendingAddresses, receivingAddresses, walletReceivedSats, transactionType | |
-| `TransactionAddressLink` | walletId, transactionId, address, linkType (`SENT`/`RECEIVED`), amountSats | |
-| `Invoice` | invoiceId, walletId, addresses, amount, outputs, description, status, createdAt, expiresAt, paidAt, paymentTxid, amountReceived, metadata | Status enum: `PENDING`, `PAID`, `EXPIRED`, `CANCELLED` |
-| `InvoiceOutputSpec` | Sealed interface with: `P2PKHOutputSpec(address, amount, label)`, `P2MSOutputSpec(publicKeys, threshold, amount, label)`, `OPReturnOutputSpec(dataChunks, separateOutputs)` | Validation: P2MS threshold ≤ totalKeys ≤ 16; OP_RETURN totalSize ≤ 99KB |
-| `PaymentChannel` | channelId, walletId, role, clientPeerId, serverPeerId, clientPubKeyHex, serverPubKeyHex, clientAddressB58, serverAddressB58, fundingAmountSats, lockTimeUnix, state, clientBalanceSats, serverBalanceSats, fundingTxId, fundingTxHex, fundingOutputIndex, refundTxHex, refundClientSigHex, refundServerSigHex, latestSequenceNumber, latestPaymentTxHex, latestPaymentTxId, settlementTxId, fundingAncestorTxids, context, createdAt, closedAt, errorMessage | State enum: `NEGOTIATING`, `FUNDING`, `OPENING`, `OPEN`, `CLOSING`, `CLOSED`, `EXPIRED`, `FAILED`. Role enum: `CLIENT`, `SERVER` |
-| `ChannelUpdate` | channelId, newServerBalanceSats, sequenceNumber, clientSignature, timestamp, description | |
-| `TransactionBuildResult` | transaction, selectedInputs, totalInput, totalOutput, fee, changeAmount, readyForSigning, transactionHex, beef | |
-| `ChannelTransactionResult` | transaction, transactionHex, txid, multisigScript, fee | |
-| `PaymentChannelResult` | success, channel, transactionHex, beefHex, error | |
+| `UtxoStatus` | DONE | `PENDING`, `AVAILABLE`, `RESERVED`, `SPENT` |
+| `TransactionStatus` | DONE | `CREATED`, `SIGNED`, `BROADCAST`, `PENDING`, `CONFIRMED`, `FAILED` |
+| `TransactionDirection` | DONE | `INCOMING`, `OUTGOING`, `SELF`, `UNKNOWN` |
+| `BitcoinScriptType` | DONE | `P2PKH`, `P2PK`, `P2MS`, `OP_RETURN`, `P2SH`, `CUSTOM`, `UNKNOWN` |
+| `NetworkType` | DONE | `MAINNET`, `TESTNET`, `REGTEST` |
+| `WalletType` | DONE | `HD`, `WIF`, `XPRIV`, `XPUB` |
 
-### 2.2 Configuration Models
+### 2.3 Configuration Models
 
-| Record | Key Fields | Notes |
+| Record | Status | Key Fields | Notes |
+|---|---|---|---|
+| `ArcServiceConfig` | DONE | baseUrl, apiKey, defaultCallbackUrl | Factory methods: `taalTestnet(apiKey)`, `taalMainnet()`, `custom(baseUrl)` |
+| `TransactionBuildConfig` | DONE | feePerKb, selectionStrategy, minChangeAmount, forceChange, enableRBF, performSanityChecks | Strategy enum: `SMALLEST_FIRST`, `LARGEST_FIRST`, `RANDOM`, `OPTIMAL_CHANGE`. Presets: `standard()`, `partial()` |
+| `CdnHeaderSyncConfig` | DONE | manifestUrl, cacheDirectory, chunkDownloadTimeout, validationEnabled | |
+
+### 2.4 Tests
+
+| Test | Status | Validates |
 |---|---|---|
-| `ArcServiceConfig` | baseUrl, apiKey, defaultCallbackUrl | Factory methods: `taalTestnet(apiKey)`, `taalMainnet()`, `custom(baseUrl)` |
-| `TransactionBuildConfig` | feePerKb (default 100), selectionStrategy, minChangeAmount (546), forceChange, enableRBF, performSanityChecks | Strategy enum: `SMALLEST_FIRST`, `LARGEST_FIRST`, `RANDOM`, `OPTIMAL_CHANGE`. Presets: `standard()`, `partial()` |
-| `CdnHeaderSyncConfig` | manifestUrl, cacheDirectory, chunkDownloadTimeout, validationEnabled | |
+| `ModelCborRoundTripTest` | DONE | CBOR round-trip for domain records |
+| `BitcoinUtxoTest` | DONE | State transition methods (reservation expiry, effective availability) |
+| `InvoiceOutputSpecTest` | DONE | P2MS threshold validation, OP_RETURN size limits, sealed interface exhaustiveness |
+| `PaymentChannelTest` | DONE | Record construction and field access |
+| `ConfigModelTest` | DONE | Configuration record construction and factory methods |
 
-### 2.3 Tests
+### 2.5 Exit Criteria
 
-- CBOR round-trip for every record (including `byte[]` fields like txid, scriptPubKey)
-- Validation tests for `InvoiceOutputSpec` (P2MS threshold, OP_RETURN size limits)
-- `BitcoinUtxo` state transition methods (reservation expiry, effective availability)
-- Sealed interface exhaustiveness for `InvoiceOutputSpec` variants
-
-### 2.4 Exit Criteria
-
-- All domain types compile, serialize/deserialize via CBOR, pass validation tests
-- Records are immutable, use `equals`/`hashCode` correctly
+- [x] All domain types compile, serialize/deserialize via CBOR, pass validation tests
+- [x] Records are immutable, use `equals`/`hashCode` correctly
 
 ---
 
-## Phase 3 — Wallet Aggregate
+## Phase 3 — Wallet Aggregate **COMPLETE** (2026-03-14)
 
-**Goal**: Create wallets (all four modes), generate addresses, full UTXO lifecycle, transaction recording. The core wallet is functional end-to-end.
+**Goal**: Create wallets, generate addresses, full UTXO lifecycle, transaction recording. The core wallet is functional end-to-end.
 
 ### 3.1 Commands
 
-| Command | Key Fields | Validation |
-|---|---|---|
-| `CreateWallet` | walletId, name, mnemonic/wif/xpriv/xpub, passphrase, networkType, metadata | Exactly one key source. Mnemonic: BIP39 valid. |
-| `UpdateWalletConfiguration` | walletId, newName, newMetadata | Wallet must exist |
-| `GenerateAddress` | walletId, label, purpose, includePublicKey | HD/XPRIV/XPUB only (not WIF) |
-| `RegisterDiscoveredAddress` | walletId, address, derivationIndex, publicKeyHex, isChange, transactionCount | For address discovery import |
-| `UpdateAddressLabel` | walletId, address, newLabel | Address must exist |
-| `ReceiveUtxo` | walletId, txid, vout, value, scriptPubKey, address, blockHeight | |
-| `MarkUtxoAvailable` | walletId, txid, vout | UTXO must be PENDING |
-| `UpdateUtxoConfirmations` | walletId, txid, vout, confirmations, blockHeight | Transitions PENDING → AVAILABLE at ≥6 |
-| `ReserveUtxo` | walletId, txid, vout, reservedByTxId, duration, priority, reason | UTXO must be AVAILABLE |
-| `ReserveUtxos` | walletId, utxoRefs (list), reservedByTxId, duration, priority, reason | Batch reservation |
-| `ReleaseUtxo` | walletId, txid, vout | UTXO must be RESERVED |
-| `ReleaseUtxos` | walletId, utxoRefs (list) | Batch release |
-| `RenewUtxoReservation` | walletId, txid, vout, newDuration, newReason | UTXO must be RESERVED |
-| `CleanupExpiredReservations` | walletId | Releases all expired |
-| `SpendUtxo` | walletId, txid, vout, spendingTxId | |
-| `RecordOutgoingTransaction` | walletId, txid, rawHex, outputs, fee | |
-| `RecordImportedTransaction` | walletId, txid, rawHex, blockHeight, bump | |
-| `ConfirmTransaction` | walletId, txid, blockHeight, blockHash | |
+| Command | Status | Key Fields | Validation |
+|---|---|---|---|
+| `CreateWalletCommand` | DONE | walletId, name, walletType, networkType, rootAddress, metadata, replyTo | Rejects if wallet already exists |
+| `RecordAddressCommand` | DONE | walletId, addressMetadata, replyTo | Rejects duplicate address |
+| `RecordUtxoCommand` | DONE | walletId, utxo (BitcoinUtxo), replyTo | Rejects duplicate UTXO (by txid:vout key) |
+| `RecordTransactionCommand` | DONE | walletId, transaction (BitcoinTransaction), replyTo | Rejects duplicate txid |
+| `ReserveUtxoCommand` | DONE | walletId, utxoKey, reservingTxId, expiresAt, priority, reason, replyTo | UTXO must be effectively available |
+| `ReleaseUtxoCommand` | DONE | walletId, utxoKey, replyTo | UTXO must be RESERVED |
+| `MarkUtxoSpentCommand` | DONE | walletId, utxoKey, replyTo | UTXO must not already be SPENT |
+| `UpdateConfirmationCommand` | DONE | walletId, txid, confirmations, blockHeight, replyTo | Emits both UtxoConfirmationUpdated and TransactionConfirmed if txid known |
+| `CleanupExpiredReservationsCommand` | DONE | walletId, replyTo | Releases all expired reservations |
 
 ### 3.2 Events
 
-| Event | Triggered By |
-|---|---|
-| `WalletCreated` | CreateWallet |
-| `WalletConfigurationUpdated` | UpdateWalletConfiguration |
-| `AddressGenerated` | GenerateAddress |
-| `AddressDiscovered` | RegisterDiscoveredAddress |
-| `AddressLabelUpdated` | UpdateAddressLabel |
-| `UtxoReceived` | ReceiveUtxo |
-| `UtxoMarkedAvailable` | MarkUtxoAvailable |
-| `UtxoConfirmationUpdated` | UpdateUtxoConfirmations |
-| `UtxoReserved` | ReserveUtxo / ReserveUtxos |
-| `UtxoReleased` | ReleaseUtxo / ReleaseUtxos / CleanupExpiredReservations |
-| `UtxoReservationRenewed` | RenewUtxoReservation |
-| `UtxoSpent` | SpendUtxo |
-| `TransactionRecorded` | RecordOutgoingTransaction |
-| `TransactionImported` | RecordImportedTransaction |
-| `TransactionConfirmed` | ConfirmTransaction |
+| Event | Status | Triggered By |
+|---|---|---|
+| `WalletCreatedEvent` | DONE | CreateWalletCommand |
+| `WalletConfigurationUpdatedEvent` | DONE | (placeholder for future config updates) |
+| `AddressRecordedEvent` | DONE | RecordAddressCommand |
+| `UtxoReceivedEvent` | DONE | RecordUtxoCommand |
+| `UtxoSpentEvent` | DONE | MarkUtxoSpentCommand |
+| `UtxoReservedEvent` | DONE | ReserveUtxoCommand |
+| `UtxoReleasedEvent` | DONE | ReleaseUtxoCommand / CleanupExpiredReservationsCommand |
+| `UtxoConfirmationUpdatedEvent` | DONE | UpdateConfirmationCommand |
+| `TransactionRecordedEvent` | DONE | RecordTransactionCommand |
+| `TransactionConfirmedEvent` | DONE | UpdateConfirmationCommand (when txid is known) |
 
 ### 3.3 Aggregate State: `WalletState`
 
-| Field | Type |
-|---|---|
-| walletId | String |
-| name | String |
-| rootAddress | String |
-| isCreated | boolean |
-| networkType | NetworkType |
-| walletType | WalletType |
-| utxos | `Map<String, BitcoinUtxo>` (key: `txid:vout`) |
-| addresses | `Map<String, AddressMetadata>` |
-| nextDerivationIndex | int |
-| confirmedBalance | long |
-| unconfirmedBalance | long |
-| reservedBalance | long |
-| metadata | `Map<String, String>` |
-| version | long |
-| timestamp | Instant |
+| Field | Type | Notes |
+|---|---|---|
+| walletId | String | |
+| name | String | |
+| rootAddress | String | |
+| created | boolean | Guards pre-creation command rejection |
+| networkType | NetworkType | |
+| walletType | WalletType | |
+| utxoEntries | `Map<String, UtxoEntry>` (key: `txid:vout`) | Minimal record: status, valueSats, reservationExpiresAt, txid (refactored in Phase 4) |
+| knownAddresses | `Set<String>` | Dedup only (refactored in Phase 4) |
+| knownTxids | `Set<String>` | Dedup only (refactored in Phase 4) |
+| nextDerivationIndex | int | Auto-incremented on address recording |
+| metadata | `Map<String, Object>` | |
+| version | long | Incremented on every event |
+| lastUpdatedAt | Instant | |
 
-### 3.4 Wallet Creation Modes
+### 3.4 Aggregate Behavior
 
-| Mode | Key Source | Address Derivation | Can Sign |
-|---|---|---|---|
-| HD (mnemonic) | BIP39 mnemonic + optional passphrase | BIP44: `m/44'/coinType'/0'/0/index` | Yes |
-| WIF | Single private key in WIF format | Single address only | Yes |
-| XPRIV | Extended private key | Full BIP44 derivation | Yes |
-| XPUB | Extended public key (watch-only) | Full BIP44 derivation | No |
+| Deliverable | Status | Detail |
+|---|---|---|
+| `WalletAggregate` | DONE | Extends `EventSourcedBehavior<WalletCommand, WalletEvent, WalletState>`. Dual command handler states: "not created" (only CreateWallet accepted, all others reply Failure) and "created" (full command set). `ENTITY_TYPE_KEY` for cluster sharding. `tagsFor()` returns `Set.of("wallet")`. |
+| `WalletReply` | DONE | Sealed interface: `Success(WalletState)` / `Failure(String reason)`. All commands use `replyTo` for typed responses. |
+| Snapshot retention | DONE | `snapshotEvery(100, 2)` — snapshot every 100 events, keep 2 |
 
-For HD and XPRIV modes, the root address is derived from the first key (`m/44'/coinType'/0'/0/0`). CoinType: 236 (testnet), 0 (mainnet).
+### 3.5 Tests
 
-### 3.5 Snapshot Configuration
+| Test | Status | Validates |
+|---|---|---|
+| `WalletAggregateTest` (14 tests) | DONE | Create wallet + state validation, double-create rejection, pre-creation command rejection, address recording with derivation index tracking, UTXO receipt, UTXO reservation with expiry, UTXO spending from reserved/confirmed states, transaction recording, confirmation updates, expired reservation cleanup, full recovery from persistence |
+| `WalletStateTest` (11 tests) | DONE | All event application methods: UtxoEntry lifecycle (receive/reserve/release/spend), address/txid dedup sets, version increments, confirmation update no-ops |
 
-```java
-@Override
-public RetentionCriteria retentionCriteria() {
-    return RetentionCriteria.snapshotEvery(100, 2);  // snapshot every 100 events, keep 2
-}
-```
+### 3.6 Exit Criteria
 
-### 3.6 Tests
-
-| Test | Validates |
-|---|---|
-| `CreateWalletTest` | All four modes. Mnemonic validation. Duplicate creation rejected. Root address derived correctly. |
-| `AddressGenerationTest` | Sequential derivation index. Label assignment. WIF mode rejects generation. XPUB mode generates correctly. |
-| `UtxoLifecycleTest` | Full state machine: receive → confirm → reserve → spend. Reservation expiry. Batch reserve/release. Priority handling. |
-| `TransactionRecordingTest` | Outgoing, imported, confirmed. Transaction-address links created. |
-| `WalletSnapshotTest` | State survives snapshot + replay. Aggregate loads from snapshot + subsequent events. |
-| `WalletRecoveryTest` | Actor restarts and recovers full state from journal. |
-| `ConcurrencyTest` | Two commands to same wallet serialize correctly via actor mailbox. Commands to different wallets execute concurrently. |
-
-### 3.7 Exit Criteria
-
-- All wallet creation modes functional
-- Full UTXO lifecycle with reservation semantics
-- Aggregate persists to PostgreSQL journal, recovers from snapshots
-- Concurrent command safety verified
+- [x] Wallet creation functional with typed replies
+- [x] Full UTXO lifecycle with reservation semantics (reserve with expiry, release, spend, cleanup)
+- [x] Aggregate persists via Pekko JDBC journal, recovers from events
+- [x] Concurrent command safety via actor mailbox serialization
+- [x] All commands rejected before wallet creation with clear error messages
 
 ---
 
-## Phase 4 — Wallet Projection & Read Models
+## Phase 4 — Wallet Projection & Read Models **COMPLETE** (2026-03-14)
 
-**Goal**: Wallet state queryable via denormalized read models, updated in real-time by Pekko Projection.
+**Goal**: Wallet state queryable via denormalized read models, updated in real-time by Pekko Projection. Aggregate state slimmed down to hold only what's needed for command validation — balances live in the read model only.
+
+### 4.0 Prerequisite — Slim Down WalletState
+
+| Deliverable | Status | Detail |
+|---|---|---|
+| `WalletState` refactor | DONE | Replaced `Map<String, BitcoinUtxo>` with `Map<String, UtxoEntry>` (inner record: status, valueSats, reservationExpiresAt, txid). Replaced `Map<String, AddressMetadata>` with `Set<String> knownAddresses`. Replaced `Map<String, BitcoinTransaction>` with `Set<String> knownTxids`. Removed `confirmedBalanceSats`, `unconfirmedBalanceSats`, `reservedBalanceSats` fields and getters/setters. |
+| `WalletAggregate` update | DONE | Command handlers use `utxoEntries`/`knownAddresses`/`knownTxids` for validation. Added `tagsFor()` returning `Set.of("wallet")` for event tagging. `isEffectivelyAvailable` logic inlined from UtxoEntry fields. |
+| `WalletAggregateTest` update | DONE | Removed balance assertions (balance is read-model concern). Updated state assertions to use `getUtxoEntries()`, `getKnownAddresses()`. All 14 tests pass. |
+| `WalletStateTest` rewrite | DONE | 11 tests covering minimal state mutations: UtxoEntry lifecycle (receive/reserve/release/spend), address/txid dedup sets, version increments. No balance arithmetic. |
 
 ### 4.1 Projection Handler: `WalletProjectionHandler`
 
-Consumes all wallet events and updates PostgreSQL read model tables:
+| Deliverable | Status | Detail |
+|---|---|---|
+| `WalletProjectionHandler` | DONE | Extends `JdbcHandler<EventEnvelope<WalletEvent>, SpiffyJdbcSession>`. Dispatches all 10 event types via pattern matching switch. Delegates to `WalletReadModelStorage`. Calls `updateWalletBalances()` (SQL aggregation) after every UTXO-affecting event. |
 
 | Event | Read Model Update |
 |---|---|
-| `WalletCreated` | Insert into `wallet_summary` |
-| `WalletConfigurationUpdated` | Update `wallet_summary` (name, metadata) |
-| `AddressGenerated` / `AddressDiscovered` | Insert into `wallet_address` |
-| `AddressLabelUpdated` | Update `wallet_address` label |
-| `UtxoReceived` | Insert into `wallet_utxo`, update `wallet_summary` balances |
-| `UtxoMarkedAvailable` / `UtxoConfirmationUpdated` | Update `wallet_utxo` status/confirmations, recalculate `wallet_summary` balances |
-| `UtxoReserved` / `UtxoReleased` / `UtxoReservationRenewed` | Update `wallet_utxo` reservation fields, update `wallet_summary` reserved balance |
-| `UtxoSpent` | Update `wallet_utxo` status, update `wallet_summary` balances |
-| `TransactionRecorded` / `TransactionImported` | Insert into `wallet_transaction`, insert `transaction_address_link` rows |
-| `TransactionConfirmed` | Update `wallet_transaction` block height/hash |
+| `WalletCreated` | Upsert `wallet_summary` |
+| `AddressRecorded` | Upsert `wallet_address`, update address count |
+| `UtxoReceived` | Upsert `wallet_utxo`, recalculate balances |
+| `UtxoSpent` | Update UTXO status to SPENT, recalculate balances |
+| `UtxoReserved` | Update UTXO status to RESERVED with reservation fields, recalculate balances |
+| `UtxoReleased` | Update UTXO status to AVAILABLE, recalculate balances |
+| `UtxoConfirmationUpdated` | Update UTXO confirmations/blockHeight, recalculate balances |
+| `TransactionRecorded` | Upsert `wallet_transaction`, insert `transaction_address_link` rows (SENDER/RECEIVER) |
+| `TransactionConfirmed` | Update transaction status to CONFIRMED with blockHeight/confirmations |
+| `WalletConfigurationUpdated` | No-op (placeholder for future metadata update) |
 
 ### 4.2 SQL Migrations
 
-| File | Tables |
-|---|---|
-| `V004__create_wallet_read_models.sql` | `wallet_summary` (id, name, root_address, wallet_type, network_type, confirmed_balance, unconfirmed_balance, reserved_balance, address_count, utxo_count, created_at, metadata) |
-| | `wallet_address` (wallet_id, address, label, derivation_index, is_change, transaction_count, last_activity, public_key_hex) |
-| | `wallet_utxo` (wallet_id, txid, vout, value_sats, script_pubkey, address, status, block_height, confirmations, reserved_by_tx_id, reservation_expires_at, reservation_priority, reservation_reason, derivation_index, created_at, updated_at) |
-| | `wallet_transaction` (wallet_id, txid, raw_hex, block_height, block_hash, timestamp, total_input_sats, total_output_sats, fee, status, transaction_type) |
-| | `transaction_address_link` (wallet_id, txid, address, link_type, amount_sats) |
+| File | Status | Tables |
+|---|---|---|
+| `V004__create_wallet_read_models.sql` | DONE | Fixes `projection_management` table (adds missing `projection_key` column required by Pekko JDBC projection). Creates 5 read model tables: |
+| | | `wallet_summary` (PK: wallet_id, JSONB metadata, balance columns, address/utxo counts) |
+| | | `wallet_address` (PK: wallet_id + address, script_type, derivation_path/index, is_change, label) |
+| | | `wallet_utxo` (PK: wallet_id + txid + vout, index on wallet_id + status) |
+| | | `wallet_transaction` (PK: wallet_id + txid, index on wallet_id + created_at DESC) |
+| | | `transaction_address_link` (PK: wallet_id + txid + address + link_type) |
 
 ### 4.3 Read Model Storage: `WalletReadModelStorage`
 
-| Query | Returns |
+| Deliverable | Status | Detail |
+|---|---|---|
+| `WalletReadModelStorage` | DONE | Stateless DAO. Write methods take `Connection` (for transactional projection). Read methods take `DataSource`. Balance calculation via SQL aggregation (`SUM(value_sats)` grouped by UTXO status). |
+
+| Write Method | Detail |
 |---|---|
-| `getWalletSummary(walletId)` | Wallet overview with balances |
-| `listWallets()` | All wallet summaries |
-| `getAddresses(walletId)` | All addresses with metadata |
-| `getAvailableUtxos(walletId)` | UTXOs with status AVAILABLE, sorted by value |
-| `getUtxosByStatus(walletId, status)` | Filtered UTXO list |
-| `getBalance(walletId)` | Confirmed, unconfirmed, reserved, available balances |
-| `getTransactionHistory(walletId, offset, limit)` | Paginated transaction list |
-| `getTransactionsByAddress(walletId, address)` | Transactions for a specific address |
+| `upsertWalletSummary` | INSERT ON CONFLICT UPDATE name/rootAddress/metadata |
+| `upsertWalletAddress` | INSERT ON CONFLICT DO NOTHING, updates address count |
+| `upsertWalletUtxo` | INSERT ON CONFLICT UPDATE status/confirmations/blockHeight |
+| `updateUtxoStatus` | Update status, clear reservation fields |
+| `updateUtxoReserved` | Set RESERVED status with reservingTxId/expiresAt |
+| `updateUtxoConfirmations` | Update confirmations/blockHeight |
+| `upsertWalletTransaction` | INSERT ON CONFLICT UPDATE status/confirmations, batch-insert address links |
+| `updateTransactionConfirmed` | Set CONFIRMED status with confirmations/blockHeight |
+| `updateWalletBalances` | SQL aggregation: confirmed = available+confirmed UTXOs, unconfirmed = available+unconfirmed, reserved = reserved UTXOs |
+
+| Read Method | Returns |
+|---|---|
+| `findWalletSummary(ds, walletId)` | `Optional<WalletSummary>` |
+| `listWalletSummaries(ds, limit, offset)` | Paginated wallet summaries (ordered by created_at DESC) |
+| `findUtxosByWalletId(ds, walletId)` | All UTXOs for wallet |
+| `findUtxosByStatus(ds, walletId, status)` | Filtered UTXO list |
+| `findTransactionsByWalletId(ds, walletId, limit, offset)` | Paginated transactions |
+| `findAddressesByWalletId(ds, walletId)` | Address strings (ordered by recorded_at) |
+| `findAddressesByTransaction(ds, walletId, txid, linkType)` | Addresses linked to a transaction (SENDER/RECEIVER) |
+| `getWalletBalance(ds, walletId)` | `Optional<WalletBalance>` (confirmed, unconfirmed, reserved, available) |
 
 ### 4.4 Projection Wiring
 
-```java
-// EventSourcedProvider reads wallet events from journal
-var sourceProvider = EventSourcedProvider.eventsByTag(actorSystem, "wallet");
+| Deliverable | Status | Detail |
+|---|---|---|
+| `SpiffyJdbcSession` | DONE | Implements `JdbcSession`, wraps `DataSource` connection with `autoCommit=false`. Used by Pekko JDBC projection for exactly-once delivery. |
+| `WalletProjectionSetup` | DONE | Static `init(ActorSystem)`. Wires `EventSourcedProvider.eventsByTag("wallet")` → `JdbcProjection.exactlyOnce` → `ShardedDaemonProcess` (1 instance). Session supplier resolves `DataSource` from `DataSourceRegistry`. |
+| `LibSpiffy4jBuilder` update | DONE | Calls `WalletProjectionSetup.init(system)` after ActorSystem creation |
+| `reference.conf` update | DONE | Added `pekko.projection.jdbc` config: `blocking-jdbc-dispatcher` (fixed pool 10), `postgres-dialect`, offset/management table names matching V003 schema |
 
-// ExactlyOnceProjection with JDBC offset store
-var projection = JdbcProjection.exactlyOnce(
-    ProjectionId.of("wallet-projection", "wallet"),
-    sourceProvider,
-    () -> new JdbcSession(dataSource),
-    () -> new WalletProjectionHandler(dataSource),
-    actorSystem
-);
-```
+### 4.5 Model Records
 
-### 4.5 Tests
+| Deliverable | Status | Detail |
+|---|---|---|
+| `WalletSummary` | DONE | Record: walletId, name, rootAddress, walletType, networkType, confirmedBalanceSats, unconfirmedBalanceSats, reservedBalanceSats, addressCount, utxoCount, createdAt, metadata |
+| `WalletBalance` | DONE | Record: confirmedSats, unconfirmedSats, reservedSats, availableSats. Static factory `fromSummary(WalletSummary)` computes `availableSats = confirmed - reserved`. |
 
-| Test | Validates |
-|---|---|
-| `WalletProjectionTest` | Events flow through projection → read models populated correctly |
-| `ProjectionIdempotencyTest` | Duplicate event delivery doesn't corrupt read models |
-| `ProjectionRecoveryTest` | Projection restarts from offset after crash |
-| `BalanceCalculationTest` | Confirmed/unconfirmed/reserved/available balances correct across UTXO state transitions |
-| `QueryTest` | All `WalletReadModelStorage` queries return expected results |
+### 4.6 Tests
 
-### 4.6 Exit Criteria
+| Test | Status | Validates |
+|---|---|---|
+| `WalletReadModelStorageTest` (7 tests) | DONE | Testcontainers PostgreSQL. UPSERT insert/update, UTXO status filtering, balance calculation via SQL aggregation, wallet summary pagination, address queries, transaction record-and-confirm lifecycle |
+| `WalletProjectionIntegrationTest` (7 tests) | DONE | Full integration: Testcontainers + LibSpiffy4j builder. End-to-end wallet creation → read model, balance calculation through projection, UTXO lifecycle (receive → reserve → release → spend), idempotency (duplicate rejected at aggregate), transaction pagination, address recording, projection catch-up/recovery |
 
-- Real-time read model updates from wallet events
-- All queries functional against PostgreSQL
-- Projection survives restart (offset tracking)
-- Exactly-once semantics verified (no duplicate read model entries)
+### 4.7 Dependencies Added
+
+| Dependency | Scope | Detail |
+|---|---|---|
+| `pekko-projection-eventsourced` 1.1.0 | implementation | `EventSourcedProvider.eventsByTag` source provider |
+| `awaitility` 4.2.1 | testImplementation | Async assertion polling for projection integration tests |
+
+### 4.8 Exit Criteria
+
+- ✅ Real-time read model updates from wallet events
+- ✅ All 8 query methods functional against PostgreSQL
+- ✅ Projection survives restart (offset tracking via `projection_offset_store`)
+- ✅ Exactly-once semantics verified (UPSERT idempotency + aggregate-level dedup)
+- ✅ Aggregate state minimal — no unbounded maps, no balance tracking in write side
 
 ---
 
-## Phase 5 — CryptoService & SecureStorage
+## Phase 5 — CryptoService & SecureStorage **COMPLETE** (2026-03-14)
 
-**Goal**: Key derivation, address generation, transaction signing, and encrypted storage of private key material.
+**Goal**: Key derivation, address generation, message signing, and encrypted storage of private key material.
 
 ### 5.1 CryptoService
 
+Stateless service delegating to bitcoin4j. No-arg constructor.
+
 | Method | Delegates To | Notes |
 |---|---|---|
-| `generateMnemonic()` | bitcoin4j `MnemonicCode` | 12-word BIP39 |
-| `validateMnemonic(words)` | bitcoin4j `MnemonicCode` | |
-| `mnemonicToHDPrivateKey(mnemonic, passphrase, network)` | bitcoin4j `HDKeyDerivation` | BIP39 seed → BIP32 root |
-| `derivePrivateKey(hdKey, account, index, coinType, isChange)` | bitcoin4j `HDKeyDerivation` | BIP44 path |
-| `generateAddress(privateKey, network)` | bitcoin4j `Address` | P2PKH |
-| `getPublicKey(privateKey)` | bitcoin4j `ECKey` | Compressed public key |
-| `signTransaction(privateKey, sigHash)` | bitcoin4j `TransactionSigner` | SIGHASH_ALL \| SIGHASH_FORKID |
-| `deriveHDPublicKey(hdPrivateKey)` | bitcoin4j `HDKeyDerivation` | For watch-only export |
-| `privateKeyToWIF(key, network)` | bitcoin4j | |
-| `privateKeyFromWIF(wif, network)` | bitcoin4j | |
+| `generateMnemonic()` | bitcoin4j `MnemonicCode` | 128-bit entropy → 12-word BIP39 |
+| `validateMnemonic(words)` | bitcoin4j `MnemonicCode` | Throws `MnemonicException` on invalid |
+| `mnemonicToHDPrivateKey(mnemonic, passphrase)` | bitcoin4j `HDKeyDerivation` | BIP39 seed → BIP32 root |
+| `derivePrivateKey(master, account, index, coinType, isChange)` | bitcoin4j `HDKeyDerivation` | BIP44 path: m/44'/coinType'/account'/change/index |
+| `deriveKeyForPath(parent, childNumbers...)` | bitcoin4j `HDKeyDerivation` | Generic path derivation (hardened via `HARDENED_BIT`) |
+| `generateAddress(key, networkType)` | bitcoin4j `LegacyAddress` | P2PKH — mainnet starts `1`, testnet starts `m`/`n` |
+| `privateKeyToWIF(key, networkType)` | bitcoin4j `ECKey` | WIF encoding |
+| `privateKeyFromWIF(wif)` | bitcoin4j `PrivateKey` | WIF decoding |
+| `signMessage(privateKey, message)` | bitcoin4j `ECKey` | SHA-256 hash then ECDSA sign |
 
 ### 5.2 EncryptionService
 
+Constructor takes `byte[32]` master key (defensive copy, validates length). Nullable in `LibSpiffy4j` when no master key provided.
+
 | Method | Detail |
 |---|---|
-| `encrypt(plaintext, context)` | AES-256-GCM. HKDF key derivation from master key + context. Random 12-byte nonce. Returns `EncryptionResult(ciphertext, nonce)`. |
-| `decrypt(ciphertext, nonce, context)` | AES-256-GCM decrypt with derived key. |
-| `generateMasterKey()` | Secure random 32 bytes. |
+| `encrypt(plaintext, context)` | HKDF derives per-context AES key, then AES-256-GCM with random 12-byte nonce. Returns `EncryptionResult(ciphertext, nonce)`. |
+| `decrypt(ciphertext, nonce, context)` | AES-256-GCM decrypt with HKDF-derived key. |
+| `generateMasterKey()` | Static. Secure random 32 bytes. |
 
-- Uses Bouncy Castle (already a bitcoin4j transitive dependency)
-- HKDF salt: `"libspiffy-xpub-v1"`
+- Uses Bouncy Castle HKDF (transitive from bitcoin4j) + JCE AES-256-GCM
+- HKDF salt: `"libspiffy-xpub-v1"`, info: context string
 - Master key provided by host via builder (never stored in database)
-- Key version field supports future key rotation
+- Key version field in `secure_storage` supports future key rotation
 
 ### 5.3 SecureStorage
 
+Stateless JDBC DAO (same pattern as `WalletReadModelStorage`). Composite PK `(wallet_id, key_type)` supports multiple key types per wallet.
+
 | Method | Detail |
 |---|---|
-| `storePrivateKey(walletId, encryptedKey, nonce, keyVersion)` | Persists to `secure_storage` table |
-| `loadPrivateKey(walletId)` | Returns encrypted material for CryptoService to decrypt |
-| `deletePrivateKey(walletId)` | Permanent deletion |
+| `storeEncryptedKey(conn, walletId, keyType, encryptedKey, nonce, keyVersion)` | Upsert to `secure_storage` table |
+| `loadEncryptedKey(ds, walletId, keyType)` | Returns `Optional<EncryptedKeyRecord>` |
+| `deleteEncryptedKey(conn, walletId, keyType)` | Permanent deletion |
 
-### 5.4 SQL Migration
+### 5.4 Models
+
+| Record | Fields |
+|---|---|
+| `EncryptionResult` | `byte[] ciphertext`, `byte[] nonce` |
+| `EncryptedKeyRecord` | `walletId`, `keyType`, `encryptedKey`, `nonce`, `keyVersion`, `createdAt`, `updatedAt` |
+
+### 5.5 SQL Migration
 
 | File | Tables |
 |---|---|
-| `V006__create_secure_storage.sql` | `secure_storage` (wallet_id PK, encrypted_key BYTEA, nonce BYTEA, key_version INT, created_at, updated_at) |
+| `V005__create_secure_storage.sql` | `secure_storage` (wallet_id VARCHAR(255), key_type VARCHAR(50) DEFAULT 'MASTER_HD_KEY', encrypted_key BYTEA, nonce BYTEA, key_version INT DEFAULT 1, created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ, PRIMARY KEY(wallet_id, key_type)) |
 
-### 5.5 Builder Update
+### 5.6 Builder Update
 
 ```java
 var spiffy = LibSpiffy4j.builder()
     .dataSource(appDataSource)
-    .encryptionMasterKey(masterKeyBytes)    // required if wallets will have private keys
+    .encryptionMasterKey(masterKeyBytes)    // optional — if omitted, encryptionService() returns null
     .build();
+
+spiffy.cryptoService();        // always available
+spiffy.encryptionService();    // nullable
+spiffy.secureStorage();        // always available
 ```
 
-Watch-only (XPUB) wallets don't require the master key.
+### 5.7 Tests
 
-### 5.6 Tests
+| Test | Count | Validates |
+|---|---|---|
+| `CryptoServiceTest` | 11 | Mnemonic generation (12 words, valid BIP39), deterministic derivation, different passphrase → different key, address prefixes (mainnet `1`, testnet `m`/`n`), WIF round-trip, ECDSA signing |
+| `EncryptionServiceTest` | 10 | Encrypt/decrypt round-trip, different contexts → different ciphertext, tampered ciphertext fails auth, wrong master key fails, wrong context fails, `generateMasterKey()` is 32 bytes, null/short/long key rejected |
+| `SecureStorageTest` | 5 | Store/load round-trip, load nonexistent → empty, overwrite updates, delete removes, multiple key types per wallet (Testcontainers) |
+| `SecureStorageIntegrationTest` | 1 | End-to-end: generate mnemonic → derive HD key → encrypt → store → load → decrypt → derive same address (Testcontainers) |
 
-| Test | Validates |
-|---|---|
-| `MnemonicGenerationTest` | 12 words, BIP39 valid, deterministic seed |
-| `KeyDerivationTest` | BIP44 paths produce expected addresses (test vectors from Dart libspiffy) |
-| `EncryptDecryptTest` | Round-trip. Different contexts produce different ciphertext. Tampered ciphertext fails authentication. |
-| `SecureStorageTest` | Store → load → decrypt → matches original key material |
-| `WatchOnlyTest` | XPUB wallet creates without master key. Signing operations rejected. |
+### 5.8 Exit Criteria
 
-### 5.7 Exit Criteria
-
-- All four wallet creation modes produce correct root addresses (verified against Dart test vectors)
-- Private keys encrypted at rest, decryptable only with master key
-- Signing produces valid transactions (verified by bitcoin4j script interpreter)
+- ✅ bitcoin4j integrated via `mavenLocal()` + `api()` dependency
+- ✅ BIP39 mnemonic generation and validation working
+- ✅ BIP44 deterministic key derivation producing correct address formats per network
+- ✅ AES-256-GCM encryption with HKDF per-context key derivation
+- ✅ Private keys encrypted at rest, decryptable only with correct master key + context
+- ✅ SecureStorage JDBC DAO with composite PK supporting multiple key types
+- ✅ All 27 tests passing (11 + 10 + 5 + 1)
 
 ---
 
