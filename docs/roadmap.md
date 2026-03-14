@@ -641,7 +641,7 @@ spiffy.secureStorage();        // always available
 
 ---
 
-## Phase 9 — Payment Channel Aggregate
+## Phase 9 — Payment Channel Aggregate **COMPLETE** (2026-03-14)
 
 **Goal**: Full nLockTime-based payment channel lifecycle — funding, refund, off-chain payments, settlement.
 
@@ -991,12 +991,12 @@ Legend:  ◄───── depends on                                 │   │
 | BUMP merkle proof verification | Phase 8 | DONE |
 | Block header chain & validation | Phase 8 | DONE |
 | Chain reorganization handling | Phase 8 | Deferred — continuity validation done |
-| Payment channel negotiation | Phase 9 | |
-| 2-of-2 multisig funding (T1) | Phase 9 | |
-| nLockTime refund (T2) | Phase 9 | |
-| Off-chain payments with nSequence (T3) | Phase 9 | |
-| Cooperative & timeout settlement | Phase 9 | |
-| Channel ↔ wallet UTXO coordination | Phase 9 | Process manager pattern |
+| Payment channel negotiation | Phase 9 | DONE |
+| 2-of-2 multisig funding (T1) | Phase 9 | DONE — via PaymentChannelBuilder |
+| nLockTime refund (T2) | Phase 9 | DONE — refund build/countersign flow |
+| Off-chain payments with nSequence (T3) | Phase 9 | DONE — balance conservation + sequence monotonicity |
+| Cooperative & timeout settlement | Phase 9 | DONE — CloseChannel/FinalizeClose/ClaimRefund |
+| Channel ↔ wallet UTXO coordination | Phase 9 | Deferred — process manager pattern (Phase 11) |
 | ARC service client | Phase 10 | |
 | ARC callback integration | Phase 10 | |
 | Block header CDN sync | Phase 10 | |
