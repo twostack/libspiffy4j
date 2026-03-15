@@ -51,6 +51,25 @@ The `spv` and `service` packages can be used standalone without an actor system.
 
 ## Documentation
 
+### Developer Guide
+
+- **[Application Developer Guide](APP_DEVELOPER_GUIDE.md)** -- complete API reference for all three tiers (stateless, SPV, event-sourced)
+
+### Feature Guides
+
+- [Wallet Lifecycle](docs/wallet-lifecycle-guide.md) -- create wallet, derive addresses, build transactions, SPV confirmation, UTXO state machine
+- [Payment Channels](docs/payment-channels-guide.md) -- T1/T2/T3 transactions, channel state machine, client/server workflows
+- [Invoice Management](docs/invoice-guide.md) -- invoice lifecycle, output specs, payment matching, expiration
+- [Secure Storage](docs/secure-storage-guide.md) -- master key management, HKDF encryption, key rotation
+
+### Infrastructure Guides
+
 - [Integration Guide](docs/integration-guide.md) -- composing libspiffy4j with a P2P node or other header sources
 - [ARC Dependency](docs/arc-dependency.md) -- ARC configuration, error handling, and why ARC is mandatory
 - [Architecture](docs/architecture.md) -- full architectural overview and design decisions
+
+### Examples
+
+- [`examples/StatelessServicesExample.java`](examples/StatelessServicesExample.java) -- key derivation, tx building, coin selection (no Pekko)
+- [`examples/SpvValidationExample.java`](examples/SpvValidationExample.java) -- ARC, headers, transaction import, BEEF (no Pekko)
+- [`examples/EventSourcedWalletExample.java`](examples/EventSourcedWalletExample.java) -- full LibSpiffy4j setup, wallet CRUD, read models (Pekko + PostgreSQL)
