@@ -57,6 +57,27 @@ public final class BlockHeaderChain implements BlockHeaderStore {
     }
 
     /**
+     * Removes all headers in [fromHeight, toHeight] and recalculates chain height.
+     */
+    @Override
+    public void invalidateRange(int fromHeight, int toHeight) {
+        for (int h = fromHeight; h <= toHeight; h++) {
+            String hash = heightToHash.remove(h);
+            if (hash != null) {
+                byHash.remove(hash);
+            }
+        }
+
+        // Recalculate chain height if tip was invalidated
+        if (chainHeight >= fromHeight && chainHeight <= toHeight) {
+            chainHeight = heightToHash.keySet().stream()
+                    .mapToInt(Integer::intValue)
+                    .max()
+                    .orElse(-1);
+        }
+    }
+
+    /**
      * Validates that headers exist for every height in [fromHeight, toHeight]
      * and that each header's prevBlockHash matches the hash of the prior header.
      */

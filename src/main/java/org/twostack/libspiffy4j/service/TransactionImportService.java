@@ -25,6 +25,7 @@ public final class TransactionImportService {
     private final ArcService arcService;
     private final BlockHeaderStore chain;
     private final Set<String> pendingTxids = ConcurrentHashMap.newKeySet();
+    private final ConcurrentHashMap<String, Long> confirmedTxHeights = new ConcurrentHashMap<>();
 
     public TransactionImportService(ArcService arcService, BlockHeaderStore chain) {
         this.arcService = arcService;
@@ -40,6 +41,10 @@ public final class TransactionImportService {
         MerkleProofData proofData = arcService.getMerkleProof(txid);
 
         boolean spvValid = validateSpv(txid, proofData, txResponse.blockHeight());
+
+        if (spvValid) {
+            confirmedTxHeights.put(txid, txResponse.blockHeight());
+        }
 
         return new ImportedTransaction(
                 txid,
@@ -113,6 +118,28 @@ public final class TransactionImportService {
         }
 
         return confirmed;
+    }
+
+    /**
+     * Returns txids confirmed at heights within [fromHeight, toHeight].
+     */
+    public Set<String> getConfirmedTxidsInRange(int fromHeight, int toHeight) {
+        Set<String> result = ConcurrentHashMap.newKeySet();
+        for (var entry : confirmedTxHeights.entrySet()) {
+            long h = entry.getValue();
+            if (h >= fromHeight && h <= toHeight) {
+                result.add(entry.getKey());
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Moves a confirmed transaction back to pending status (used during reorgs).
+     */
+    public void moveToPending(String txid) {
+        confirmedTxHeights.remove(txid);
+        pendingTxids.add(txid);
     }
 
     private boolean validateSpv(String txid, MerkleProofData proofData, long blockHeight) {

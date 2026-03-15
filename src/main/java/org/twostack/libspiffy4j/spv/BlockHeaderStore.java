@@ -11,4 +11,10 @@ public interface BlockHeaderStore {
     BlockHeader getHeader(int height);
 
     int getChainHeight();
+
+    /**
+     * Invalidates all headers in the range [fromHeight, toHeight].
+     * Default implementation is a no-op for stores that don't support reorgs.
+     */
+    default void invalidateRange(int fromHeight, int toHeight) {}
 }

@@ -135,4 +135,67 @@ class BlockHeaderChainTest {
         var chain = new BlockHeaderChain();
         assertThat(chain.getChainHeight()).isEqualTo(-1);
     }
+
+    @Test
+    void invalidateRange_removesHeaders() {
+        var chain = new BlockHeaderChain();
+        chain.addHeader(10, dummyHeader(10));
+        chain.addHeader(11, dummyHeader(11));
+        chain.addHeader(12, dummyHeader(12));
+
+        chain.invalidateRange(10, 11);
+
+        assertThat(chain.getHeader(10)).isNull();
+        assertThat(chain.getHeader(11)).isNull();
+        assertThat(chain.getHeader(12)).isNotNull();
+        assertThat(chain.size()).isEqualTo(1);
+    }
+
+    @Test
+    void invalidateRange_recalculatesChainHeight_whenTipInvalidated() {
+        var chain = new BlockHeaderChain();
+        chain.addHeader(10, dummyHeader(10));
+        chain.addHeader(20, dummyHeader(20));
+        chain.addHeader(30, dummyHeader(30));
+        assertThat(chain.getChainHeight()).isEqualTo(30);
+
+        chain.invalidateRange(25, 35);
+
+        assertThat(chain.getChainHeight()).isEqualTo(20);
+    }
+
+    @Test
+    void invalidateRange_allHeaders_chainHeightResets() {
+        var chain = new BlockHeaderChain();
+        chain.addHeader(5, dummyHeader(5));
+        chain.addHeader(6, dummyHeader(6));
+
+        chain.invalidateRange(5, 6);
+
+        assertThat(chain.getChainHeight()).isEqualTo(-1);
+        assertThat(chain.size()).isZero();
+    }
+
+    @Test
+    void invalidateRange_emptyRange_isIdempotent() {
+        var chain = new BlockHeaderChain();
+        chain.addHeader(10, dummyHeader(10));
+
+        chain.invalidateRange(20, 30);
+
+        assertThat(chain.getHeader(10)).isNotNull();
+        assertThat(chain.getChainHeight()).isEqualTo(10);
+    }
+
+    @Test
+    void invalidateRange_tipNotInRange_chainHeightUnchanged() {
+        var chain = new BlockHeaderChain();
+        chain.addHeader(10, dummyHeader(10));
+        chain.addHeader(20, dummyHeader(20));
+        chain.addHeader(30, dummyHeader(30));
+
+        chain.invalidateRange(10, 15);
+
+        assertThat(chain.getChainHeight()).isEqualTo(30);
+    }
 }
