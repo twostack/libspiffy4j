@@ -461,7 +461,7 @@ spiffy.secureStorage();        // always available
 - **No aggregate interaction**: Services return `TransactionBuildResult` with `selectedUtxos` so the caller can issue Reserve/MarkSpent commands
 - **Stateless services**: All receive UTXOs as params — no DataSource, no wallet lookup
 - **Signing key per-call**: Caller handles decryption from SecureStorage
-- **BEEF output**: Deferred — requires merkle proof infrastructure (Phase 8+)
+- **BEEF output**: DONE — `BeefBuilder` assembles BEEF bundles with BUMP de-duplication by block height (2026-03-15)
 
 ---
 
@@ -694,7 +694,7 @@ Payment channels interact with the wallet aggregate for UTXO management:
 - **Funding**: Channel requests UTXO reservation from wallet → wallet emits `UtxoReserved` → channel proceeds with T1
 - **Settlement**: Channel close → wallet receives settlement UTXOs → wallet emits `UtxoReceived`
 
-This coordination is implemented via Pekko persistent actors as process managers, reacting to events from both aggregates through projections.
+This coordination is implemented via the `ChannelWalletSaga` — a Pekko persistent process manager (`EventSourcedBehavior`) that reacts to channel events through `ChannelWalletProjectionHandler`. See saga package.
 
 ### 9.6 Channel Projection & Read Model
 
@@ -987,7 +987,7 @@ Legend:  ◄───── depends on                                 │   │
 | Dust prevention | Phase 6 | DONE |
 | Multisig transaction building | Phase 6 | DONE — 2-of-2 for channels |
 | UTXO Benford splitting | Phase 6 | DONE |
-| BEEF output | Phase 6 | Deferred — needs merkle proofs |
+| BEEF output | Phase 6 | DONE — `BeefBuilder` with BUMP de-duplication |
 | Invoice creation with expiration | Phase 7 | DONE |
 | Multi-output invoices (P2PKH, P2MS, OP_RETURN) | Phase 7 | DONE |
 | Invoice status lifecycle | Phase 7 | DONE |
@@ -995,13 +995,13 @@ Legend:  ◄───── depends on                                 │   │
 | BEEF parsing | Phase 8 | DONE |
 | BUMP merkle proof verification | Phase 8 | DONE |
 | Block header chain & validation | Phase 8 | DONE |
-| Chain reorganization handling | Phase 8 | Deferred — continuity validation done |
+| Chain reorganization handling | Phase 8 | DONE — `ReorganizationHandler` with header invalidation + tx pending recovery |
 | Payment channel negotiation | Phase 9 | DONE |
 | 2-of-2 multisig funding (T1) | Phase 9 | DONE — via PaymentChannelBuilder |
 | nLockTime refund (T2) | Phase 9 | DONE — refund build/countersign flow |
 | Off-chain payments with nSequence (T3) | Phase 9 | DONE — balance conservation + sequence monotonicity |
 | Cooperative & timeout settlement | Phase 9 | DONE — CloseChannel/FinalizeClose/ClaimRefund |
-| Channel ↔ wallet UTXO coordination | Phase 9 | Deferred — process manager pattern (Phase 11) |
+| Channel ↔ wallet UTXO coordination | Phase 9 | DONE — `ChannelWalletSaga` persistent process manager + projection handler |
 | ARC service client | Phase 10 | DONE — submit, query, merkle proof via HttpClient |
 | ARC callback integration | Phase 10 | DONE — X-CallbackUrl header support |
 | Block header CDN sync | Phase 10 | DONE — manifest + chunk download with SHA-256 validation |
@@ -1009,7 +1009,7 @@ Legend:  ◄───── depends on                                 │   │
 | Address discovery (gap limit) | Phase 10 | DONE — BIP44 receiving + change chains, coinType 236/1 |
 | Transaction import with SPV validation | Phase 10 | DONE — merkle root verification against BlockHeaderChain |
 | Chain tip tracking & confirmation monitoring | Phase 10 | DONE — poll-based, 6-block default threshold |
-| Wallet import/recovery from XPRIV | Phase 10 | Deferred — combines discovery + import + aggregate commands |
+| Wallet import/recovery from XPRIV | Phase 10 | DONE — `WalletRecoveryService` orchestrates discovery + import + UTXO extraction |
 | Micrometer metrics | Phase 11 | |
 | Health indicator | Phase 11 | |
 | Snapshot tuning | Phase 11 | |
