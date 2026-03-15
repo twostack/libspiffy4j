@@ -41,7 +41,8 @@ class WalletReadModelStorageTest {
 
         String[] scripts = {
                 "db/libspiffy4j/V003__create_projection_offset.sql",
-                "db/libspiffy4j/V004__create_wallet_read_models.sql"
+                "db/libspiffy4j/V004__create_wallet_read_models.sql",
+                "db/libspiffy4j/V007__add_raw_hex_to_wallet_transaction.sql"
         };
         try (Connection conn = dataSource.getConnection();
              Statement stmt = conn.createStatement()) {
@@ -252,6 +253,67 @@ class WalletReadModelStorageTest {
 
         txs = storage.findTransactionsByWalletId(dataSource, "w6", 10, 0);
         assertThat(txs.get(0).status()).isEqualTo(TransactionStatus.CONFIRMED);
+    }
+
+    @Test
+    void upsertWalletTransaction_persistsAndRetrievesRawHex() throws Exception {
+        createSummary("w7");
+
+        BitcoinTransaction tx = new BitcoinTransaction("w7", "txRawHex1", "0100000001abcdef",
+                TransactionStatus.BROADCAST, TransactionDirection.OUTGOING,
+                null, 0, 0, 50000, 1000, 49000,
+                List.of(), List.of(),
+                Instant.now(), Instant.now(), null, 0, 2);
+
+        try (Connection conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            storage.upsertWalletTransaction(conn, "w7", tx);
+            conn.commit();
+        }
+
+        List<BitcoinTransaction> txs = storage.findTransactionsByWalletId(dataSource, "w7", 10, 0);
+        assertThat(txs).hasSize(1);
+        assertThat(txs.get(0).rawHex()).isEqualTo("0100000001abcdef");
+    }
+
+    @Test
+    void findRawHexByTxid_returnsStoredHex() throws Exception {
+        createSummary("w8");
+
+        BitcoinTransaction tx = new BitcoinTransaction("w8", "txFindHex1", "deadbeef01020304",
+                TransactionStatus.BROADCAST, TransactionDirection.OUTGOING,
+                null, 0, 0, 50000, 1000, 49000,
+                List.of(), List.of(),
+                Instant.now(), Instant.now(), null, 0, 2);
+
+        try (Connection conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            storage.upsertWalletTransaction(conn, "w8", tx);
+            conn.commit();
+        }
+
+        Optional<String> rawHex = storage.findRawHexByTxid(dataSource, "txFindHex1");
+        assertThat(rawHex).isPresent().hasValue("deadbeef01020304");
+    }
+
+    @Test
+    void findRawHexByTxid_returnsEmptyWhenNotStored() throws Exception {
+        createSummary("w9");
+
+        BitcoinTransaction tx = new BitcoinTransaction("w9", "txNoHex1", null,
+                TransactionStatus.BROADCAST, TransactionDirection.OUTGOING,
+                null, 0, 0, 50000, 1000, 49000,
+                List.of(), List.of(),
+                Instant.now(), Instant.now(), null, 0, 2);
+
+        try (Connection conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            storage.upsertWalletTransaction(conn, "w9", tx);
+            conn.commit();
+        }
+
+        Optional<String> rawHex = storage.findRawHexByTxid(dataSource, "txNoHex1");
+        assertThat(rawHex).isEmpty();
     }
 
     private void createSummary(String walletId) throws Exception {

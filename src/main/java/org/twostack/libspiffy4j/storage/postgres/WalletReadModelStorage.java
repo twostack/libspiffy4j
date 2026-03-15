@@ -154,13 +154,14 @@ public class WalletReadModelStorage {
                                           BitcoinTransaction tx) throws SQLException {
         String sql = """
                 INSERT INTO wallet_transaction (wallet_id, txid, status, direction, block_height, confirmations,
-                    input_value_sats, output_value_sats, fee_sats, net_amount_sats, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    input_value_sats, output_value_sats, fee_sats, net_amount_sats, created_at, updated_at, raw_hex)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (wallet_id, txid) DO UPDATE SET
                     status = EXCLUDED.status,
                     block_height = EXCLUDED.block_height,
                     confirmations = EXCLUDED.confirmations,
-                    updated_at = EXCLUDED.updated_at
+                    updated_at = EXCLUDED.updated_at,
+                    raw_hex = COALESCE(EXCLUDED.raw_hex, wallet_transaction.raw_hex)
                 """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, walletId);
@@ -183,6 +184,11 @@ public class WalletReadModelStorage {
             ps.setLong(10, tx.netAmountSats());
             ps.setTimestamp(11, Timestamp.from(tx.createdAt()));
             ps.setTimestamp(12, Timestamp.from(tx.updatedAt()));
+            if (tx.rawHex() != null) {
+                ps.setString(13, tx.rawHex());
+            } else {
+                ps.setNull(13, Types.VARCHAR);
+            }
             ps.executeUpdate();
         }
 
@@ -350,6 +356,20 @@ public class WalletReadModelStorage {
         }
     }
 
+    public Optional<String> findRawHexByTxid(DataSource ds, String txid) throws SQLException {
+        String sql = "SELECT raw_hex FROM wallet_transaction WHERE txid = ? AND raw_hex IS NOT NULL LIMIT 1";
+        try (Connection conn = ds.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, txid);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return Optional.of(rs.getString("raw_hex"));
+                }
+                return Optional.empty();
+            }
+        }
+    }
+
     public Optional<WalletBalance> getWalletBalance(DataSource ds, String walletId) throws SQLException {
         return findWalletSummary(ds, walletId).map(WalletBalance::fromSummary);
     }
@@ -443,7 +463,7 @@ public class WalletReadModelStorage {
         return new BitcoinTransaction(
                 walletId,
                 rs.getString("txid"),
-                null, // rawHex not stored in read model
+                rs.getString("raw_hex"),
                 TransactionStatus.valueOf(rs.getString("status")),
                 dirStr != null ? TransactionDirection.valueOf(dirStr) : null,
                 blockHeight,
