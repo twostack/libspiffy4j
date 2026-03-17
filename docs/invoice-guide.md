@@ -1,5 +1,7 @@
 # Invoice Guide
 
+> **The Coordinator API is the recommended way to interact with the event-sourced layer.** Direct aggregate interaction is shown in some sections for operations not yet available on the coordinator, but should be avoided where possible. Bypassing the coordinator can leave the wallet in an inconsistent state.
+
 This guide covers the invoice lifecycle in libspiffy4j: creating invoices, defining output specifications, monitoring payment, and querying invoice state.
 
 ---
@@ -26,7 +28,7 @@ Invoices in libspiffy4j represent payment requests with:
 - An **expiration time** after which the invoice is no longer valid
 - Optional **metadata** for application-specific context (order IDs, etc.)
 
-Invoices are managed by the `InvoiceAggregate` (event-sourced) and queryable via `InvoiceReadModelStorage`.
+Invoices are managed by the `InvoiceAggregate` (event-sourced) and queryable via `InvoiceReadModelStorage`. The recommended way to create and manage invoices is through the `WalletCoordinator` API.
 
 ---
 
@@ -60,18 +62,17 @@ All transitions are from `PENDING` only — `PAID`, `EXPIRED`, and `CANCELLED` a
 ## Creating an Invoice
 
 ```java
-String invoiceId = UUID.randomUUID().toString();
+import org.apache.pekko.actor.typed.javadsl.AskPattern;
 
-EntityRef<InvoiceCommand> invoiceRef = sharding.entityRefFor(
-    InvoiceAggregate.ENTITY_TYPE_KEY, invoiceId
-);
+String invoiceId = UUID.randomUUID().toString();
 
 // Derive a fresh address for this invoice
 var key = crypto.derivePrivateKey(hdKey, 0, nextIndex, 0, false);
 String paymentAddress = crypto.generateAddress(key, NetworkType.MAINNET);
 
-invoiceRef.ask(
-    replyTo -> new InvoiceCommand.CreateInvoiceCommand(
+CompletionStage<CoordinatorReply> reply = AskPattern.ask(
+    libSpiffy.coordinator(),
+    replyTo -> new CoordinatorCommand.CreateInvoice(
         invoiceId,
         walletId,
         List.of(paymentAddress),        // addresses to monitor
@@ -84,11 +85,15 @@ invoiceRef.ask(
         Map.of("orderId", "789", "customerEmail", "user@example.com"),  // metadata
         replyTo
     ),
-    Duration.ofSeconds(10)
-).toCompletableFuture().join();
+    Duration.ofSeconds(10),
+    libSpiffy.system().scheduler()
+);
+
+CoordinatorReply result = reply.toCompletableFuture().join();
+// result is InvoiceCreated(id) on success, or Failure on error
 ```
 
-**CreateInvoiceCommand fields:**
+**CreateInvoice coordinator command fields:**
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -105,7 +110,7 @@ invoiceRef.ask(
 
 ## InvoiceOutputSpec Variants
 
-Invoices support three output types via the sealed `InvoiceOutputSpec` interface:
+Invoices support four output types via the sealed `InvoiceOutputSpec` interface:
 
 ### P2PKH (Pay-to-Public-Key-Hash)
 
@@ -153,6 +158,20 @@ new InvoiceOutputSpec.OPReturnOutputSpec(
 **Constraints:**
 - Total data size must not exceed 99,000 bytes
 
+### Plugin (Plugin-Defined Output)
+
+Output defined by a payment plugin:
+
+```java
+new InvoiceOutputSpec.PluginOutputSpec(
+    pluginId,       // plugin identifier
+    action,         // plugin action
+    pluginParams    // plugin-specific parameters
+)
+```
+
+Use `PluginOutputSpec` when the output structure is determined by a plugin at build time rather than being statically defined. The plugin resolves the parameters into concrete transaction outputs during `BuildPluginPayment`.
+
 ---
 
 ## Multi-Output Invoices
@@ -162,10 +181,14 @@ Invoices can specify multiple outputs. This is useful for:
 - **Split payments** — Portions to different addresses (e.g., merchant + platform fee)
 - **Data + payment** — OP_RETURN alongside a payment output
 - **Escrow** — Multisig output for dispute resolution
+- **Plugin-driven outputs** — Plugin-defined outputs alongside standard payments
 
 ```java
-invoiceRef.ask(
-    replyTo -> new InvoiceCommand.CreateInvoiceCommand(
+import org.apache.pekko.actor.typed.javadsl.AskPattern;
+
+AskPattern.ask(
+    libSpiffy.coordinator(),
+    replyTo -> new CoordinatorCommand.CreateInvoice(
         invoiceId, walletId,
         List.of(merchantAddress, platformAddress),
         55_000L,     // total amount
@@ -181,7 +204,8 @@ invoiceRef.ask(
         Map.of("orderId", orderId),
         replyTo
     ),
-    Duration.ofSeconds(10)
+    Duration.ofSeconds(10),
+    libSpiffy.system().scheduler()
 ).toCompletableFuture().join();
 ```
 
@@ -192,26 +216,36 @@ invoiceRef.ask(
 When your application detects a transaction paying to an invoice's addresses, mark the invoice as paid:
 
 ```java
-invoiceRef.ask(
-    replyTo -> new InvoiceCommand.MarkInvoicePaidCommand(
+import org.apache.pekko.actor.typed.javadsl.AskPattern;
+
+CompletionStage<CoordinatorReply> reply = AskPattern.ask(
+    libSpiffy.coordinator(),
+    replyTo -> new CoordinatorCommand.MarkInvoicePaid(
         invoiceId,
         paymentTxid,           // transaction that paid the invoice
         amountReceivedSats,    // actual amount received
+        paymentAddress,        // address that received payment
         replyTo
     ),
-    Duration.ofSeconds(10)
-).toCompletableFuture().join();
+    Duration.ofSeconds(10),
+    libSpiffy.system().scheduler()
+);
+
+CoordinatorReply result = reply.toCompletableFuture().join();
+// result is InvoicePaid(id) on success, or Failure on error
 ```
 
-**Payment matching is your application's responsibility.** The aggregate records the payment but does not monitor the blockchain. Your application should:
+**Payment matching is your application's responsibility.** The coordinator records the payment but does not monitor the blockchain. Your application should:
 
 1. Watch for transactions to the invoice's addresses (via ARC callbacks, polling, or P2P)
 2. Verify the transaction outputs match the invoice specifications
-3. Send `MarkInvoicePaidCommand` when a valid payment is detected
+3. Send `MarkInvoicePaid` via the coordinator when a valid payment is detected
 
 ---
 
 ## Invoice Expiration and Cancellation
+
+> **Direct aggregate access (exception):** `ExpireInvoice` and `CancelInvoice` are not yet available on the coordinator. These operations still require direct aggregate interaction.
 
 ### Expiration
 
@@ -239,6 +273,10 @@ for (var inv : expired) {
 Cancel an invoice that is no longer needed:
 
 ```java
+EntityRef<InvoiceCommand> invoiceRef = sharding.entityRefFor(
+    InvoiceAggregate.ENTITY_TYPE_KEY, invoiceId
+);
+
 invoiceRef.ask(
     replyTo -> new InvoiceCommand.CancelInvoiceCommand(invoiceId, replyTo),
     Duration.ofSeconds(10)

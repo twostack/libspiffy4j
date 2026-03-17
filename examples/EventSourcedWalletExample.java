@@ -2,16 +2,13 @@ package examples;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import org.apache.pekko.actor.typed.ActorRef;
 import org.apache.pekko.actor.typed.ActorSystem;
-import org.apache.pekko.cluster.sharding.typed.javadsl.ClusterSharding;
-import org.apache.pekko.cluster.sharding.typed.javadsl.EntityRef;
+import org.apache.pekko.actor.typed.javadsl.AskPattern;
 
 import org.twostack.libspiffy4j.LibSpiffy4j;
-import org.twostack.libspiffy4j.aggregate.wallet.WalletAggregate;
-import org.twostack.libspiffy4j.aggregate.wallet.WalletCommand;
-import org.twostack.libspiffy4j.aggregate.wallet.WalletReply;
-import org.twostack.libspiffy4j.aggregate.invoice.InvoiceAggregate;
-import org.twostack.libspiffy4j.aggregate.invoice.InvoiceCommand;
+import org.twostack.libspiffy4j.coordinator.CoordinatorCommand;
+import org.twostack.libspiffy4j.coordinator.CoordinatorReply;
 import org.twostack.libspiffy4j.model.*;
 import org.twostack.libspiffy4j.service.CryptoService;
 import org.twostack.libspiffy4j.service.EncryptionService;
@@ -28,16 +25,22 @@ import java.util.UUID;
 import java.util.concurrent.CompletionStage;
 
 /**
- * Demonstrates the full event-sourced layer: LibSpiffy4j bootstrap, wallet aggregate
- * commands, invoice creation, and read model queries.
+ * Demonstrates the Coordinator API: LibSpiffy4j bootstrap, wallet and invoice
+ * operations via the WalletCoordinator, and read model queries.
+ *
+ * The Coordinator API ({@code libSpiffy.coordinator()}) is the recommended way
+ * to interact with the event-sourced layer. It provides a unified command/reply
+ * interface that handles aggregate routing, UTXO reservation, and transaction
+ * building internally.
  *
  * Requires: PostgreSQL database with Pekko persistence schema.
  *
  * Covers:
  *   - LibSpiffy4j initialization and lifecycle
- *   - Wallet creation via aggregate command
- *   - Address and UTXO recording
- *   - Invoice creation
+ *   - Wallet creation via the Coordinator API
+ *   - Address and UTXO recording via the Coordinator API
+ *   - Invoice creation via the Coordinator API
+ *   - Balance query via the Coordinator API
  *   - Read model queries (WalletReadModelStorage, InvoiceReadModelStorage)
  *   - Secure key storage
  */
@@ -59,14 +62,14 @@ public class EventSourcedWalletExample {
             .build();
 
         ActorSystem<Void> system = libSpiffy.system();
-        ClusterSharding sharding = ClusterSharding.get(system);
+        ActorRef<CoordinatorCommand> coordinator = libSpiffy.coordinator();
 
         var crypto = libSpiffy.cryptoService();
         var encryption = libSpiffy.encryptionService();
         var secureStorage = libSpiffy.secureStorage();
 
         // ---------------------------------------------------------------
-        // 2. Create a Wallet (Aggregate Command)
+        // 2. Create a Wallet (Coordinator API)
         // ---------------------------------------------------------------
 
         // Generate keys
@@ -77,26 +80,23 @@ public class EventSourcedWalletExample {
 
         String walletId = UUID.randomUUID().toString();
 
-        // Get entity reference for this wallet
-        EntityRef<WalletCommand> walletRef = sharding.entityRefFor(
-            WalletAggregate.ENTITY_TYPE_KEY, walletId
-        );
-
-        // Send CreateWalletCommand
-        CompletionStage<WalletReply> createReply = walletRef.ask(
-            replyTo -> new WalletCommand.CreateWalletCommand(
+        // Create the wallet via the coordinator
+        CompletionStage<CoordinatorReply> createReply = AskPattern.ask(
+            coordinator,
+            replyTo -> new CoordinatorCommand.CreateWallet(
                 walletId,
                 "My First Wallet",
-                rootAddress,
                 WalletType.HD,
                 NetworkType.MAINNET,
+                rootAddress,
                 Map.of("source", "example"),
                 replyTo
             ),
-            Duration.ofSeconds(10)
+            Duration.ofSeconds(10),
+            system.scheduler()
         );
 
-        WalletReply reply = createReply.toCompletableFuture().join();
+        CoordinatorReply reply = createReply.toCompletableFuture().join();
         System.out.println("Create wallet reply: " + reply);
 
         // ---------------------------------------------------------------
@@ -117,7 +117,7 @@ public class EventSourcedWalletExample {
         }
 
         // ---------------------------------------------------------------
-        // 4. Record Addresses
+        // 4. Record Addresses (Coordinator API)
         // ---------------------------------------------------------------
 
         // Derive and record multiple addresses
@@ -125,18 +125,23 @@ public class EventSourcedWalletExample {
             var key = crypto.derivePrivateKey(hdKey, 0, i, 0, false);
             String address = crypto.generateAddress(key, NetworkType.MAINNET);
 
-            walletRef.ask(
-                replyTo -> new WalletCommand.RecordAddressCommand(
-                    walletId, address, replyTo
+            // RecordAddress takes AddressMetadata, not a plain String
+            var addressMetadata = new AddressMetadata(address, i, false);
+
+            AskPattern.ask(
+                coordinator,
+                replyTo -> new CoordinatorCommand.RecordAddress(
+                    walletId, addressMetadata, replyTo
                 ),
-                Duration.ofSeconds(10)
+                Duration.ofSeconds(10),
+                system.scheduler()
             ).toCompletableFuture().join();
 
             System.out.println("Recorded address " + i + ": " + address);
         }
 
         // ---------------------------------------------------------------
-        // 5. Record a UTXO
+        // 5. Record a UTXO (Coordinator API)
         // ---------------------------------------------------------------
 
         var utxo = new BitcoinUtxo(
@@ -149,50 +154,30 @@ public class EventSourcedWalletExample {
             null, null
         );
 
-        walletRef.ask(
-            replyTo -> new WalletCommand.RecordUtxoCommand(
+        AskPattern.ask(
+            coordinator,
+            replyTo -> new CoordinatorCommand.RecordUtxo(
                 walletId, utxo, replyTo
             ),
-            Duration.ofSeconds(10)
+            Duration.ofSeconds(10),
+            system.scheduler()
         ).toCompletableFuture().join();
 
         System.out.println("Recorded UTXO: " + utxo.key());
 
         // ---------------------------------------------------------------
-        // 6. Reserve a UTXO (for spending)
-        // ---------------------------------------------------------------
-
-        walletRef.ask(
-            replyTo -> new WalletCommand.ReserveUtxoCommand(
-                walletId,
-                utxo.key(),                              // "txid:vout"
-                "spending-tx-id",                        // reserving transaction
-                Instant.now().plus(Duration.ofMinutes(5)), // expiration
-                1,                                       // priority
-                "building payment tx",                   // reason
-                replyTo
-            ),
-            Duration.ofSeconds(10)
-        ).toCompletableFuture().join();
-
-        System.out.println("Reserved UTXO for spending");
-
-        // ---------------------------------------------------------------
-        // 7. Create an Invoice
+        // 6. Create an Invoice (Coordinator API)
         // ---------------------------------------------------------------
 
         String invoiceId = UUID.randomUUID().toString();
-
-        EntityRef<InvoiceCommand> invoiceRef = sharding.entityRefFor(
-            InvoiceAggregate.ENTITY_TYPE_KEY, invoiceId
-        );
 
         String paymentAddress = crypto.generateAddress(
             crypto.derivePrivateKey(hdKey, 0, 5, 0, false), NetworkType.MAINNET
         );
 
-        invoiceRef.ask(
-            replyTo -> new InvoiceCommand.CreateInvoiceCommand(
+        AskPattern.ask(
+            coordinator,
+            replyTo -> new CoordinatorCommand.CreateInvoice(
                 invoiceId,
                 walletId,
                 List.of(paymentAddress),
@@ -203,13 +188,30 @@ public class EventSourcedWalletExample {
                 Map.of("orderId", "456"),
                 replyTo
             ),
-            Duration.ofSeconds(10)
+            Duration.ofSeconds(10),
+            system.scheduler()
         ).toCompletableFuture().join();
 
         System.out.println("Created invoice: " + invoiceId);
 
         // ---------------------------------------------------------------
-        // 8. Query Read Models
+        // 7. Query Balance via Coordinator
+        // ---------------------------------------------------------------
+
+        CompletionStage<CoordinatorReply> balanceReply = AskPattern.ask(
+            coordinator,
+            replyTo -> new CoordinatorCommand.GetBalance(walletId, replyTo),
+            Duration.ofSeconds(10),
+            system.scheduler()
+        );
+
+        CoordinatorReply balanceResult = balanceReply.toCompletableFuture().join();
+        if (balanceResult instanceof CoordinatorReply.BalanceResult br) {
+            System.out.println("Coordinator balance: " + br.balance());
+        }
+
+        // ---------------------------------------------------------------
+        // 8. Query Read Models (direct storage access)
         // ---------------------------------------------------------------
 
         // Allow a moment for projections to update the read models

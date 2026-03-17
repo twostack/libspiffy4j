@@ -1,5 +1,7 @@
 # Wallet Lifecycle Guide
 
+> **The Coordinator API is the recommended way to interact with the event-sourced layer.** Direct aggregate interaction is shown in some sections for operations not yet available on the coordinator, but should be avoided where possible. Bypassing the coordinator can leave the wallet in an inconsistent state.
+
 This guide walks through the complete wallet lifecycle in libspiffy4j: creating a wallet, deriving addresses, receiving UTXOs, building and broadcasting transactions, and SPV confirmation.
 
 ---
@@ -93,22 +95,24 @@ DeterministicKey hdKey = crypto.mnemonicToHDPrivateKey(mnemonic, "");
 ### Event-Sourced Tier (Persistent State)
 
 ```java
+import org.apache.pekko.actor.typed.javadsl.AskPattern;
+
 String walletId = UUID.randomUUID().toString();
 var key0 = crypto.derivePrivateKey(hdKey, 0, 0, 0, false);
 String rootAddress = crypto.generateAddress(key0, NetworkType.MAINNET);
 
-EntityRef<WalletCommand> walletRef = sharding.entityRefFor(
-    WalletAggregate.ENTITY_TYPE_KEY, walletId
+CompletionStage<CoordinatorReply> reply = AskPattern.ask(
+    libSpiffy.coordinator(),
+    replyTo -> new CoordinatorCommand.CreateWallet(
+        walletId, "My Wallet", WalletType.HD, NetworkType.MAINNET,
+        rootAddress, Map.of(), replyTo
+    ),
+    Duration.ofSeconds(10),
+    libSpiffy.system().scheduler()
 );
 
-WalletReply reply = walletRef.ask(
-    replyTo -> new WalletCommand.CreateWalletCommand(
-        walletId, "My Wallet", rootAddress,
-        WalletType.HD, NetworkType.MAINNET,
-        Map.of(), replyTo
-    ),
-    Duration.ofSeconds(10)
-).toCompletableFuture().join();
+CoordinatorReply result = reply.toCompletableFuture().join();
+// result is WalletCreated on success, or Failure on error
 ```
 
 ### Secure Key Storage
@@ -133,16 +137,20 @@ try (var conn = dataSource.getConnection()) {
 BIP44 path: `m / 44' / coinType' / account' / change / index`
 
 ```java
+import org.apache.pekko.actor.typed.javadsl.AskPattern;
+
 // External (receiving) addresses: change = false
 for (int i = 0; i < 10; i++) {
     var key = crypto.derivePrivateKey(hdKey, /*account=*/0, /*index=*/i,
                                       /*coinType=*/0, /*isChange=*/false);
     String address = crypto.generateAddress(key, NetworkType.MAINNET);
 
-    // Record in the aggregate (event-sourced tier)
-    walletRef.ask(
-        replyTo -> new WalletCommand.RecordAddressCommand(walletId, address, replyTo),
-        Duration.ofSeconds(10)
+    // Record in the wallet via the coordinator
+    AskPattern.ask(
+        libSpiffy.coordinator(),
+        replyTo -> new CoordinatorCommand.RecordAddress(walletId, addressMetadata, replyTo),
+        Duration.ofSeconds(10),
+        libSpiffy.system().scheduler()
     ).toCompletableFuture().join();
 }
 
@@ -150,6 +158,8 @@ for (int i = 0; i < 10; i++) {
 var changeKey = crypto.derivePrivateKey(hdKey, 0, 0, 0, true);
 String changeAddress = crypto.generateAddress(changeKey, NetworkType.MAINNET);
 ```
+
+**Note:** `RecordAddress` takes an `AddressMetadata` object, not a plain address string. Construct the appropriate `AddressMetadata` for each address you derive.
 
 **Coin type values:**
 - `0` = mainnet
@@ -162,6 +172,8 @@ String changeAddress = crypto.generateAddress(changeKey, NetworkType.MAINNET);
 When your application detects a payment to one of the wallet's addresses, record the UTXO:
 
 ```java
+import org.apache.pekko.actor.typed.javadsl.AskPattern;
+
 var utxo = new BitcoinUtxo(
     txid, vout, valueSats,
     scriptPubKey, address,
@@ -173,15 +185,23 @@ var utxo = new BitcoinUtxo(
     derivationIndex        // Which address index received this
 );
 
-walletRef.ask(
-    replyTo -> new WalletCommand.RecordUtxoCommand(walletId, utxo, replyTo),
-    Duration.ofSeconds(10)
+AskPattern.ask(
+    libSpiffy.coordinator(),
+    replyTo -> new CoordinatorCommand.RecordUtxo(walletId, utxo, replyTo),
+    Duration.ofSeconds(10),
+    libSpiffy.system().scheduler()
 ).toCompletableFuture().join();
 ```
 
 After the transaction is confirmed and SPV-validated, update confirmations:
 
+> **Direct aggregate access (exception):** `UpdateConfirmationCommand` is not yet available on the coordinator. This is one of the few operations that still requires direct aggregate interaction.
+
 ```java
+EntityRef<WalletCommand> walletRef = sharding.entityRefFor(
+    WalletAggregate.ENTITY_TYPE_KEY, walletId
+);
+
 walletRef.ask(
     replyTo -> new WalletCommand.UpdateConfirmationCommand(
         walletId, txid, confirmations, blockHeight, replyTo
@@ -194,90 +214,69 @@ walletRef.ask(
 
 ## Build and Broadcast a Transaction
 
-### 1. Select UTXOs
+The coordinator's `BuildPayment` command handles UTXO selection, reservation, transaction building, and marking UTXOs as spent in a single atomic operation. This replaces the previous multi-step manual process.
+
+### 1. Build the Transaction via Coordinator
 
 ```java
-// Query available UTXOs from the read model
-var walletStorage = new WalletReadModelStorage();
-List<BitcoinUtxo> available = walletStorage.findUtxosByStatus(
-    dataSource, walletId, UtxoStatus.AVAILABLE
+import org.apache.pekko.actor.typed.javadsl.AskPattern;
+
+CompletionStage<CoordinatorReply> paymentReply = AskPattern.ask(
+    libSpiffy.coordinator(),
+    replyTo -> new CoordinatorCommand.BuildPayment(
+        walletId,
+        List.of(new InvoiceOutputSpec.P2PKHOutputSpec(recipientAddress, targetSats, "payment")),
+        TransactionBuildConfig.standard(),
+        changeAddress,
+        replyTo
+    ),
+    Duration.ofSeconds(10),
+    libSpiffy.system().scheduler()
 );
 
-// Or use CoinSelector for specific strategies
-var selector = new CoinSelector();
-var selection = selector.select(available, targetSats, UtxoSelectionStrategy.OPTIMAL_CHANGE);
-```
-
-### 2. Reserve Selected UTXOs
-
-```java
-for (var utxo : selection.selected()) {
-    walletRef.ask(
-        replyTo -> new WalletCommand.ReserveUtxoCommand(
-            walletId, utxo.key(),
-            "pending-tx-id",
-            Instant.now().plus(Duration.ofMinutes(5)),
-            1, "building payment",
-            replyTo
-        ),
-        Duration.ofSeconds(10)
-    ).toCompletableFuture().join();
+CoordinatorReply result = paymentReply.toCompletableFuture().join();
+if (result instanceof CoordinatorReply.PaymentBuilt built) {
+    System.out.println("Built txid: " + built.result().txid());
+    System.out.println("Fee: " + built.result().feeSats() + " sats");
+    String rawHex = built.result().rawHex();
+} else if (result instanceof CoordinatorReply.Failure failure) {
+    System.err.println("Payment failed: " + failure.message());
 }
 ```
 
-### 3. Build the Transaction
+The `BuildPayment` command internally:
+1. Selects UTXOs using the configured coin selection strategy
+2. Reserves the selected UTXOs
+3. Builds and signs the transaction
+4. Records the transaction in the wallet
+5. Marks the consumed UTXOs as spent
 
-```java
-var buildService = new TransactionBuildService(crypto);
+### 2. Broadcast via ARC
 
-TransactionBuildResult result = buildService.buildTransaction(
-    selection.selected(),
-    List.of(new InvoiceOutputSpec.P2PKHOutputSpec(recipientAddress, targetSats, "payment")),
-    TransactionBuildConfig.standard(),
-    changeAddress,
-    signingKey,
-    NetworkType.MAINNET
-);
-```
-
-### 4. Broadcast via ARC
+Broadcasting is still a separate step since the coordinator does not handle network interaction:
 
 ```java
 var arc = new ArcService(ArcServiceConfig.taalMainnet());
-ArcSubmitResponse response = arc.submitTransaction(result.rawHex());
+ArcSubmitResponse response = arc.submitTransaction(rawHex);
 System.out.println("Broadcast txid: " + response.txid());
 ```
 
-### 5. Record the Transaction
+### Plugin Payments
+
+For plugin-based payment flows, use `BuildPluginPayment`:
 
 ```java
-var tx = new BitcoinTransaction(
-    walletId, result.txid(), result.rawHex(),
-    TransactionStatus.BROADCAST, TransactionDirection.OUTGOING,
-    null, 0,
-    result.inputValueSats(), result.outputValueSats(),
-    result.feeSats(), -targetSats,
-    List.of(/* sending addresses */),
-    List.of(recipientAddress),
-    Instant.now(), Instant.now(),
-    "payment", 0L, 2
+CompletionStage<CoordinatorReply> pluginReply = AskPattern.ask(
+    libSpiffy.coordinator(),
+    replyTo -> new CoordinatorCommand.BuildPluginPayment(
+        walletId, pluginId, action, pluginParams,
+        TransactionBuildConfig.standard(), changeAddress, replyTo
+    ),
+    Duration.ofSeconds(10),
+    libSpiffy.system().scheduler()
 );
 
-walletRef.ask(
-    replyTo -> new WalletCommand.RecordTransactionCommand(walletId, tx, replyTo),
-    Duration.ofSeconds(10)
-).toCompletableFuture().join();
-```
-
-### 6. Mark UTXOs as Spent
-
-```java
-for (var utxo : selection.selected()) {
-    walletRef.ask(
-        replyTo -> new WalletCommand.MarkUtxoSpentCommand(walletId, utxo.key(), replyTo),
-        Duration.ofSeconds(10)
-    ).toCompletableFuture().join();
-}
+// Reply is PluginPaymentBuilt(txid, rawHex, feeSats) on success
 ```
 
 ---
@@ -286,7 +285,13 @@ for (var utxo : selection.selected()) {
 
 After broadcasting, track the transaction for confirmation:
 
+> **Direct aggregate access (exception):** `UpdateConfirmationCommand` is not yet available on the coordinator. This operation still requires direct aggregate interaction.
+
 ```java
+EntityRef<WalletCommand> walletRef = sharding.entityRefFor(
+    WalletAggregate.ENTITY_TYPE_KEY, walletId
+);
+
 var headerStore = new BlockHeaderChain();
 var importService = new TransactionImportService(arc, headerStore);
 
@@ -297,7 +302,7 @@ importService.trackPendingTransaction(response.txid());
 List<ImportedTransaction> confirmed = importService.onNewBlock(newBlockHeight);
 for (var imported : confirmed) {
     if (imported.spvValid()) {
-        // Update confirmation count in the wallet
+        // Update confirmation count in the wallet (direct aggregate access)
         walletRef.ask(
             replyTo -> new WalletCommand.UpdateConfirmationCommand(
                 walletId, imported.txid(),
@@ -313,6 +318,8 @@ for (var imported : confirmed) {
 ---
 
 ## UTXO Reservation Semantics
+
+The coordinator handles UTXO reservations internally during `BuildPayment`, so manual reservation is rarely needed. The information below is provided for understanding and for the rare cases where direct reservation management is required.
 
 Reservations prevent double-spending when multiple transactions are being built concurrently.
 
@@ -330,17 +337,16 @@ Reservations prevent double-spending when multiple transactions are being built 
 - `isEffectivelyAvailable()` — returns `true` if `AVAILABLE` or if `RESERVED` with an expired reservation
 - `reservationTimeRemaining()` — returns the Duration until expiration
 
-**Cleanup:**
+**Cleanup (direct aggregate access):**
 
 ```java
-// Periodically clean up expired reservations
 walletRef.ask(
     replyTo -> new WalletCommand.CleanupExpiredReservationsCommand(walletId, replyTo),
     Duration.ofSeconds(10)
 ).toCompletableFuture().join();
 ```
 
-**Manual release:**
+**Manual release (direct aggregate access):**
 
 ```java
 walletRef.ask(
@@ -365,6 +371,43 @@ walletRef.ask(
 ---
 
 ## Querying Wallet State
+
+### Via the Coordinator
+
+The coordinator provides convenient query commands as an alternative to direct storage access:
+
+```java
+import org.apache.pekko.actor.typed.javadsl.AskPattern;
+
+// Get wallet balance
+CompletionStage<CoordinatorReply> balanceReply = AskPattern.ask(
+    libSpiffy.coordinator(),
+    replyTo -> new CoordinatorCommand.GetBalance(walletId, replyTo),
+    Duration.ofSeconds(10),
+    libSpiffy.system().scheduler()
+);
+// Reply is BalanceResult(balance)
+
+// Get transactions (paginated)
+CompletionStage<CoordinatorReply> txReply = AskPattern.ask(
+    libSpiffy.coordinator(),
+    replyTo -> new CoordinatorCommand.GetTransactions(walletId, 50, 0, replyTo),
+    Duration.ofSeconds(10),
+    libSpiffy.system().scheduler()
+);
+// Reply is TransactionsResult(txs)
+
+// Get UTXOs
+CompletionStage<CoordinatorReply> utxoReply = AskPattern.ask(
+    libSpiffy.coordinator(),
+    replyTo -> new CoordinatorCommand.GetUtxos(walletId, replyTo),
+    Duration.ofSeconds(10),
+    libSpiffy.system().scheduler()
+);
+// Reply is UtxosResult(utxos)
+```
+
+### Via Read Model Storage (Direct Queries)
 
 All read model queries go through stateless storage DAOs:
 
