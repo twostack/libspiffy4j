@@ -316,7 +316,8 @@ class WalletProjectionIntegrationTest {
                 "db/libspiffy4j/V003__create_projection_offset.sql",
                 "db/libspiffy4j/V004__create_wallet_read_models.sql",
                 "db/libspiffy4j/V007__add_raw_hex_to_wallet_transaction.sql",
-                "db/libspiffy4j/V008__add_plugin_fields.sql"
+                "db/libspiffy4j/V008__add_plugin_fields.sql",
+                "db/libspiffy4j/V009__add_script_pub_key_to_wallet_utxo.sql"
         };
         try (Connection conn = ds.getConnection();
              Statement stmt = conn.createStatement()) {

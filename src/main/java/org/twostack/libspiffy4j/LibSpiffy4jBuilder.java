@@ -93,18 +93,18 @@ public final class LibSpiffy4jBuilder {
         if (dataSource == null) {
             throw new IllegalStateException("DataSource is required");
         }
-        String systemName = LibSpiffy4j.nextSystemName();
-        var system = ActorSystemFactory.create(
-                systemName, dataSource, objectMapper, meterRegistry, configOverride);
-        WalletProjectionSetup.init(system);
-        InvoiceProjectionSetup.init(system);
-
-        // Plugin registry
+        // Plugin registry (must be created before projection setup)
         PluginRegistry pluginRegistry = new PluginRegistry();
         if (loadPluginsFromServiceLoader) {
             pluginRegistry.loadFromServiceLoader();
         }
         plugins.forEach(pluginRegistry::register);
+
+        String systemName = LibSpiffy4j.nextSystemName();
+        var system = ActorSystemFactory.create(
+                systemName, dataSource, objectMapper, meterRegistry, configOverride);
+        WalletProjectionSetup.init(system, pluginRegistry);
+        InvoiceProjectionSetup.init(system);
 
         CryptoService cryptoService = new CryptoService();
         EncryptionService encryptionService = encryptionMasterKey != null

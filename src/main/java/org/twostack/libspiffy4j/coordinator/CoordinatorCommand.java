@@ -85,6 +85,12 @@ public sealed interface CoordinatorCommand permits
 
     // ── UTXO/Transaction recording ──
 
+    /**
+     * Record a UTXO in the wallet. Callers should populate {@code scriptPubKey} on the
+     * {@link BitcoinUtxo} to enable automatic token identification in the projection layer.
+     * The projection will call {@link org.twostack.libspiffy4j.plugin.PluginRegistry#identifyScript}
+     * and enrich the UTXO with plugin metadata before persisting to the read model.
+     */
     record RecordUtxo(
             String walletId, BitcoinUtxo utxo,
             ActorRef<CoordinatorReply> replyTo

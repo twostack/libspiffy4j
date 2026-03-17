@@ -11,13 +11,14 @@ import org.apache.pekko.projection.javadsl.SourceProvider;
 import org.apache.pekko.projection.jdbc.javadsl.JdbcProjection;
 import org.twostack.libspiffy4j.aggregate.wallet.WalletEvent;
 import org.twostack.libspiffy4j.config.DataSourceRegistry;
+import org.twostack.libspiffy4j.plugin.PluginRegistry;
 import org.twostack.libspiffy4j.storage.postgres.WalletReadModelStorage;
 
 public final class WalletProjectionSetup {
 
     private WalletProjectionSetup() {}
 
-    public static void init(ActorSystem<?> system) {
+    public static void init(ActorSystem<?> system, PluginRegistry pluginRegistry) {
         WalletReadModelStorage storage = new WalletReadModelStorage();
         String systemName = system.name();
 
@@ -42,7 +43,7 @@ public final class WalletProjectionSetup {
                                         }
                                         return new SpiffyJdbcSession(ds);
                                     },
-                                    () -> new WalletProjectionHandler(storage),
+                                    () -> new WalletProjectionHandler(storage, pluginRegistry),
                                     system
                             )
                     );

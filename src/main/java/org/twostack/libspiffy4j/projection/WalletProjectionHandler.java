@@ -3,17 +3,24 @@ package org.twostack.libspiffy4j.projection;
 import org.apache.pekko.projection.eventsourced.EventEnvelope;
 import org.apache.pekko.projection.jdbc.javadsl.JdbcHandler;
 import org.twostack.libspiffy4j.aggregate.wallet.WalletEvent;
+import org.twostack.libspiffy4j.model.BitcoinUtxo;
 import org.twostack.libspiffy4j.model.UtxoStatus;
+import org.twostack.libspiffy4j.plugin.PluginRegistry;
+import org.twostack.libspiffy4j.plugin.ScriptPlugin;
 import org.twostack.libspiffy4j.storage.postgres.WalletReadModelStorage;
 
 import java.sql.Connection;
+import java.util.Map;
+import java.util.Optional;
 
 public class WalletProjectionHandler extends JdbcHandler<EventEnvelope<WalletEvent>, SpiffyJdbcSession> {
 
     private final WalletReadModelStorage storage;
+    private final PluginRegistry pluginRegistry;
 
-    public WalletProjectionHandler(WalletReadModelStorage storage) {
+    public WalletProjectionHandler(WalletReadModelStorage storage, PluginRegistry pluginRegistry) {
         this.storage = storage;
+        this.pluginRegistry = pluginRegistry;
     }
 
     @Override
@@ -35,7 +42,8 @@ public class WalletProjectionHandler extends JdbcHandler<EventEnvelope<WalletEve
                 storage.upsertWalletAddress(conn, e.walletId(), e.addressMetadata(), e.recordedAt());
             }
             case WalletEvent.UtxoReceivedEvent e -> {
-                storage.upsertWalletUtxo(conn, e.walletId(), e.utxo());
+                BitcoinUtxo utxo = enrichWithPluginData(e.utxo());
+                storage.upsertWalletUtxo(conn, e.walletId(), utxo);
                 storage.updateWalletBalances(conn, e.walletId());
             }
             case WalletEvent.UtxoSpentEvent e -> {
@@ -67,5 +75,53 @@ public class WalletProjectionHandler extends JdbcHandler<EventEnvelope<WalletEve
                 // Could update metadata on wallet_summary if needed
             }
         }
+    }
+
+    /**
+     * If the UTXO has a scriptPubKey but no pluginId, try all registered plugins
+     * to identify and extract token metadata. Returns the original UTXO unchanged
+     * if no plugin recognizes the script or if already enriched.
+     */
+    BitcoinUtxo enrichWithPluginData(BitcoinUtxo utxo) {
+        if (utxo.scriptPubKey() == null || utxo.scriptPubKey().isBlank()
+                || utxo.pluginId() != null || !pluginRegistry.hasPlugins()) {
+            return utxo;
+        }
+
+        byte[] scriptBytes = hexToBytes(utxo.scriptPubKey());
+        Optional<PluginRegistry.PluginIdentification> identification =
+                pluginRegistry.identifyScript(scriptBytes);
+
+        if (identification.isEmpty()) {
+            return utxo;
+        }
+
+        String pluginId = identification.get().pluginId();
+        ScriptPlugin plugin = pluginRegistry.getPlugin(pluginId).orElse(null);
+        if (plugin == null) {
+            return utxo;
+        }
+
+        Map<String, Object> metadata = plugin.extractMetadata(scriptBytes);
+
+        return new BitcoinUtxo(
+                utxo.txid(), utxo.vout(), utxo.valueSats(), utxo.scriptPubKey(),
+                utxo.address(), utxo.status(), utxo.blockHeight(), utxo.confirmations(),
+                utxo.createdAt(), utxo.updatedAt(),
+                utxo.reservedByTxId(), utxo.reservationExpiresAt(),
+                utxo.reservationPriority(), utxo.reservationReason(),
+                utxo.derivationIndex(),
+                pluginId, metadata
+        );
+    }
+
+    private static byte[] hexToBytes(String hex) {
+        int len = hex.length();
+        byte[] data = new byte[len / 2];
+        for (int i = 0; i < len; i += 2) {
+            data[i / 2] = (byte) ((Character.digit(hex.charAt(i), 16) << 4)
+                    + Character.digit(hex.charAt(i + 1), 16));
+        }
+        return data;
     }
 }

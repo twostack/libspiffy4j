@@ -66,15 +66,16 @@ public class WalletReadModelStorage {
 
     public void upsertWalletUtxo(Connection conn, String walletId, BitcoinUtxo utxo) throws SQLException {
         String sql = """
-                INSERT INTO wallet_utxo (wallet_id, txid, vout, value_sats, address, status, block_height, confirmations, created_at, updated_at, plugin_id, plugin_metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)
+                INSERT INTO wallet_utxo (wallet_id, txid, vout, value_sats, address, status, block_height, confirmations, created_at, updated_at, plugin_id, plugin_metadata, script_pub_key)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?)
                 ON CONFLICT (wallet_id, txid, vout) DO UPDATE SET
                     status = EXCLUDED.status,
                     block_height = EXCLUDED.block_height,
                     confirmations = EXCLUDED.confirmations,
                     updated_at = EXCLUDED.updated_at,
                     plugin_id = COALESCE(EXCLUDED.plugin_id, wallet_utxo.plugin_id),
-                    plugin_metadata = COALESCE(EXCLUDED.plugin_metadata, wallet_utxo.plugin_metadata)
+                    plugin_metadata = COALESCE(EXCLUDED.plugin_metadata, wallet_utxo.plugin_metadata),
+                    script_pub_key = COALESCE(EXCLUDED.script_pub_key, wallet_utxo.script_pub_key)
                 """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, walletId);
@@ -104,6 +105,11 @@ public class WalletReadModelStorage {
                 ps.setString(12, toJson(utxo.pluginMetadata()));
             } else {
                 ps.setNull(12, Types.VARCHAR);
+            }
+            if (utxo.scriptPubKey() != null) {
+                ps.setString(13, utxo.scriptPubKey());
+            } else {
+                ps.setNull(13, Types.VARCHAR);
             }
             ps.executeUpdate();
         }
@@ -457,7 +463,7 @@ public class WalletReadModelStorage {
                 rs.getString("txid"),
                 rs.getInt("vout"),
                 rs.getLong("value_sats"),
-                null, // scriptPubKey not stored in read model
+                rs.getString("script_pub_key"),
                 rs.getString("address"),
                 UtxoStatus.valueOf(rs.getString("status")),
                 blockHeight,

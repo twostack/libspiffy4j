@@ -22,10 +22,21 @@ import org.twostack.libspiffy4j.service.TransactionBuildService;
 import org.twostack.libspiffy4j.storage.postgres.SecureStorage;
 import org.twostack.libspiffy4j.storage.postgres.WalletReadModelStorage;
 
+import org.twostack.bitcoin4j.Utils;
+import org.twostack.bitcoin4j.address.LegacyAddress;
+import org.twostack.bitcoin4j.params.NetworkAddressType;
+import org.twostack.bitcoin4j.script.Script;
+import org.twostack.bitcoin4j.script.ScriptPattern;
+import org.twostack.bitcoin4j.transaction.Transaction;
+import org.twostack.bitcoin4j.transaction.TransactionOutput;
+
 import javax.sql.DataSource;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * Stateless Pekko Behavior that provides a unified API for wallet, invoice,
@@ -38,6 +49,7 @@ import java.util.concurrent.CompletableFuture;
 public final class WalletCoordinator {
 
     private static final Duration ASK_TIMEOUT = Duration.ofSeconds(10);
+    private static final Logger LOG = Logger.getLogger(WalletCoordinator.class.getName());
 
     private WalletCoordinator() {}
 
@@ -114,7 +126,8 @@ public final class WalletCoordinator {
                 .onMessage(CoordinatorCommand.RecordUtxo.class, cmd ->
                         onRecordUtxo(ctx, sharding, pendingCorrelations, cmd))
                 .onMessage(CoordinatorCommand.RecordTransaction.class, cmd ->
-                        onRecordTransaction(ctx, sharding, pendingCorrelations, cmd))
+                        onRecordTransaction(ctx, sharding, pluginRegistry, readModelStorage,
+                                dataSource, pendingCorrelations, cmd))
                 .onMessage(CoordinatorCommand.RecordAddress.class, cmd ->
                         onRecordAddress(ctx, sharding, pendingCorrelations, cmd))
                 .onMessage(CoordinatorCommand.WrappedWalletReply.class, cmd ->
@@ -345,6 +358,10 @@ public final class WalletCoordinator {
                 return Behaviors.same();
             }
 
+            // 10. Auto-record wallet-owned output UTXOs from the built transaction
+            autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
+                    cmd.walletId(), result.txid(), result.rawHex());
+
             cmd.replyTo().tell(new CoordinatorReply.PluginPaymentBuilt(
                     result.txid(), result.rawHex(), result.feeSats()));
         } catch (Exception e) {
@@ -378,6 +395,9 @@ public final class WalletCoordinator {
     private static Behavior<CoordinatorCommand> onRecordTransaction(
             ActorContext<CoordinatorCommand> ctx,
             ClusterSharding sharding,
+            PluginRegistry pluginRegistry,
+            WalletReadModelStorage readModelStorage,
+            DataSource dataSource,
             Map<String, ActorRef<CoordinatorReply>> pending,
             CoordinatorCommand.RecordTransaction cmd) {
 
@@ -391,6 +411,10 @@ public final class WalletCoordinator {
                 sharding.entityRefFor(WalletAggregate.ENTITY_TYPE_KEY, cmd.walletId());
         walletRef.tell(new WalletCommand.RecordTransactionCommand(
                 cmd.walletId(), cmd.transaction(), adapter));
+
+        // Auto-record wallet-owned output UTXOs from the raw transaction
+        autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
+                cmd.walletId(), cmd.transaction().txid(), cmd.transaction().rawHex());
 
         return Behaviors.same();
     }
@@ -450,6 +474,116 @@ public final class WalletCoordinator {
     }
 
     // ── Private helpers ──
+
+    /**
+     * Parse a raw transaction and auto-record any outputs owned by this wallet.
+     * Ownership is determined by:
+     * <ol>
+     *   <li>Standard scripts (P2PKH): derive address, match against wallet addresses</li>
+     *   <li>Plugin scripts: call identifyScript/extractMetadata, match ownerAddress
+     *       from metadata against wallet addresses</li>
+     * </ol>
+     * Each matched output becomes a RecordUtxo self-tell, which flows through
+     * the normal aggregate → event → projection pipeline (where plugin enrichment happens).
+     */
+    private static void autoRecordOutputUtxos(
+            ActorContext<CoordinatorCommand> ctx,
+            PluginRegistry pluginRegistry,
+            WalletReadModelStorage readModelStorage,
+            DataSource dataSource,
+            String walletId, String txid, String rawHex) {
+
+        if (rawHex == null || rawHex.isBlank()) return;
+
+        try {
+            Transaction tx = Transaction.fromHex(rawHex);
+            List<TransactionOutput> outputs = tx.getOutputs();
+
+            // Look up wallet's network type for address derivation
+            Optional<WalletSummary> summaryOpt = readModelStorage.findWalletSummary(dataSource, walletId);
+            if (summaryOpt.isEmpty()) return;
+            NetworkAddressType addrType = toNetworkAddressType(summaryOpt.get().networkType());
+
+            // Collect wallet addresses for matching
+            Set<String> walletAddresses = new HashSet<>(
+                    readModelStorage.findAddressesByWalletId(dataSource, walletId));
+
+            for (int vout = 0; vout < outputs.size(); vout++) {
+                TransactionOutput output = outputs.get(vout);
+                Script script = output.getScript();
+                byte[] scriptBytes = script.getProgram();
+                String scriptHex = Utils.HEX.encode(scriptBytes);
+
+                // Try standard address derivation first
+                String address = deriveStandardAddress(script, addrType);
+
+                if (address != null && walletAddresses.contains(address)) {
+                    recordUtxo(ctx, walletId, txid, vout, output, scriptHex, address);
+                    continue;
+                }
+
+                // Fall back to plugin identification for non-standard scripts
+                if (pluginRegistry.hasPlugins()) {
+                    Optional<PluginRegistry.PluginIdentification> identification =
+                            pluginRegistry.identifyScript(scriptBytes);
+                    if (identification.isPresent()) {
+                        ScriptPlugin plugin = pluginRegistry.getPlugin(
+                                identification.get().pluginId()).orElse(null);
+                        if (plugin != null) {
+                            Map<String, Object> metadata = plugin.extractMetadata(scriptBytes);
+                            String ownerAddress = metadata != null
+                                    ? (String) metadata.get("ownerAddress") : null;
+                            if (ownerAddress != null && walletAddresses.contains(ownerAddress)) {
+                                recordUtxo(ctx, walletId, txid, vout, output, scriptHex, ownerAddress);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Failed to auto-record output UTXOs for tx " + txid, e);
+        }
+    }
+
+    private static void recordUtxo(
+            ActorContext<CoordinatorCommand> ctx,
+            String walletId, String txid, int vout,
+            TransactionOutput output, String scriptHex, String address) {
+
+        Instant now = Instant.now();
+        BitcoinUtxo utxo = new BitcoinUtxo(
+                txid, vout, output.getAmount().longValue(), scriptHex,
+                address, UtxoStatus.AVAILABLE,
+                null, null, now, now,
+                null, null, null, null, null,
+                null, null  // pluginId/metadata enriched by projection
+        );
+        ctx.getSelf().tell(new CoordinatorCommand.RecordUtxo(
+                walletId, utxo, ctx.getSystem().ignoreRef()));
+    }
+
+    /**
+     * Derive address from a standard script type (P2PKH).
+     * Returns null for non-standard scripts.
+     */
+    private static String deriveStandardAddress(Script script, NetworkAddressType addrType) {
+        try {
+            if (ScriptPattern.isP2PKH(script)) {
+                byte[] hash160 = ScriptPattern.extractHashFromP2PKH(script);
+                return LegacyAddress.fromPubKeyHash(addrType, hash160).toBase58();
+            }
+        } catch (Exception e) {
+            // Non-standard script — not an error
+        }
+        return null;
+    }
+
+    private static NetworkAddressType toNetworkAddressType(NetworkType networkType) {
+        return switch (networkType) {
+            case MAINNET -> NetworkAddressType.MAIN_PKH;
+            case TESTNET, REGTEST -> NetworkAddressType.TEST_PKH;
+        };
+    }
 
     private static org.twostack.bitcoin4j.ECKey retrieveSigningKey(
             SecureStorage secureStorage,

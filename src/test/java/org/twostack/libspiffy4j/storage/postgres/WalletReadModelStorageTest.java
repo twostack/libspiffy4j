@@ -43,7 +43,8 @@ class WalletReadModelStorageTest {
                 "db/libspiffy4j/V003__create_projection_offset.sql",
                 "db/libspiffy4j/V004__create_wallet_read_models.sql",
                 "db/libspiffy4j/V007__add_raw_hex_to_wallet_transaction.sql",
-                "db/libspiffy4j/V008__add_plugin_fields.sql"
+                "db/libspiffy4j/V008__add_plugin_fields.sql",
+                "db/libspiffy4j/V009__add_script_pub_key_to_wallet_utxo.sql"
         };
         try (Connection conn = dataSource.getConnection();
              Statement stmt = conn.createStatement()) {
@@ -315,6 +316,82 @@ class WalletReadModelStorageTest {
 
         Optional<String> rawHex = storage.findRawHexByTxid(dataSource, "txNoHex1");
         assertThat(rawHex).isEmpty();
+    }
+
+    @Test
+    void scriptPubKey_persistedAndReadBack() throws Exception {
+        createSummary("w10");
+
+        String scriptHex = "76a914aabbccdd00112233445566778899aabbccddeeff88ac";
+        BitcoinUtxo utxo = new BitcoinUtxo("txScript1", 0, 25000, scriptHex, "addr10",
+                UtxoStatus.AVAILABLE, 200, 3, Instant.now(), Instant.now(),
+                null, null, null, null, 0, null, null);
+
+        try (Connection conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            storage.upsertWalletUtxo(conn, "w10", utxo);
+            conn.commit();
+        }
+
+        List<BitcoinUtxo> utxos = storage.findUtxosByWalletId(dataSource, "w10");
+        assertThat(utxos).hasSize(1);
+        assertThat(utxos.get(0).scriptPubKey()).isEqualTo(scriptHex);
+    }
+
+    @Test
+    void scriptPubKey_notOverwrittenWithNull() throws Exception {
+        createSummary("w11");
+
+        // First insert with scriptPubKey
+        String scriptHex = "76a91400112233445566778899aabbccddeeff0011223388ac";
+        BitcoinUtxo utxo = new BitcoinUtxo("txScript2", 0, 15000, scriptHex, "addr11",
+                UtxoStatus.AVAILABLE, 100, 1, Instant.now(), Instant.now(),
+                null, null, null, null, 0, null, null);
+
+        try (Connection conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            storage.upsertWalletUtxo(conn, "w11", utxo);
+            conn.commit();
+        }
+
+        // Second upsert with null scriptPubKey (e.g., confirmation update)
+        BitcoinUtxo update = new BitcoinUtxo("txScript2", 0, 15000, null, "addr11",
+                UtxoStatus.AVAILABLE, 100, 6, Instant.now(), Instant.now(),
+                null, null, null, null, 0, null, null);
+
+        try (Connection conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            storage.upsertWalletUtxo(conn, "w11", update);
+            conn.commit();
+        }
+
+        List<BitcoinUtxo> utxos = storage.findUtxosByWalletId(dataSource, "w11");
+        assertThat(utxos).hasSize(1);
+        assertThat(utxos.get(0).scriptPubKey()).isEqualTo(scriptHex);
+        assertThat(utxos.get(0).confirmations()).isEqualTo(6);
+    }
+
+    @Test
+    void pluginFields_persistedWithScriptPubKey() throws Exception {
+        createSummary("w12");
+
+        String scriptHex = "aa0102030405";
+        BitcoinUtxo utxo = new BitcoinUtxo("txPlugin1", 0, 10000, scriptHex, "addr12",
+                UtxoStatus.AVAILABLE, null, 0, Instant.now(), Instant.now(),
+                null, null, null, null, 0,
+                "test-plugin", Map.of("tokenId", "T001", "amount", 500));
+
+        try (Connection conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            storage.upsertWalletUtxo(conn, "w12", utxo);
+            conn.commit();
+        }
+
+        List<BitcoinUtxo> utxos = storage.findUtxosByPlugin(dataSource, "w12", "test-plugin");
+        assertThat(utxos).hasSize(1);
+        assertThat(utxos.get(0).scriptPubKey()).isEqualTo(scriptHex);
+        assertThat(utxos.get(0).pluginId()).isEqualTo("test-plugin");
+        assertThat(utxos.get(0).pluginMetadata()).containsEntry("tokenId", "T001");
     }
 
     private void createSummary(String walletId) throws Exception {
