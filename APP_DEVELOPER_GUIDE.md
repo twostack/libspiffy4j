@@ -9,7 +9,23 @@
 
 1. [Introduction](#introduction)
 2. [Quick Start](#quick-start)
-3. [Stateless Services (No Pekko Required)](#stateless-services-no-pekko-required)
+3. [Coordinator API (Recommended)](#coordinator-api-recommended)
+   - [Overview](#overview)
+   - [Accessing the Coordinator](#accessing-the-coordinator)
+   - [Wallet Commands](#wallet-commands)
+   - [Invoice Commands](#invoice-commands)
+   - [Payment Commands](#payment-commands)
+   - [Plugin Payment Commands](#plugin-payment-commands)
+   - [Read Queries](#read-queries)
+   - [Handling Replies](#handling-replies)
+4. [Token Plugin System](#token-plugin-system)
+   - [ScriptPlugin](#scriptplugin)
+   - [TransactionBuilderPlugin](#transactionbuilderplugin)
+   - [PluginRegistry](#pluginregistry)
+   - [CallbackTransactionSigner](#callbacktransactionsigner)
+   - [PluginOutputSpec](#pluginoutputspec)
+   - [ServiceLoader Support](#serviceloader-support)
+5. [Stateless Services (No Pekko Required)](#stateless-services-no-pekko-required)
    - [CryptoService](#cryptoservice)
    - [EncryptionService](#encryptionservice)
    - [TransactionBuildService](#transactionbuildservice)
@@ -24,12 +40,12 @@
    - [WalletRecoveryService](#walletrecoveryservice)
    - [ReorganizationHandler](#reorganizationhandler)
    - [PaymentChannelBuilder](#paymentchannelbuilder)
-4. [SPV Layer (No Pekko Required)](#spv-layer-no-pekko-required)
+6. [SPV Layer (No Pekko Required)](#spv-layer-no-pekko-required)
    - [BlockHeader](#blockheader)
    - [BlockHeaderStore / BlockHeaderChain](#blockheaderstore--blockheaderchain)
    - [Bump / BumpLeaf / BumpLevel](#bump--bumpleaf--bumplevel)
    - [Beef / BeefBuilder](#beef--beefbuilder)
-5. [Event-Sourced Layer (Pekko + PostgreSQL Required)](#event-sourced-layer-pekko--postgresql-required)
+7. [Event-Sourced Layer (Pekko + PostgreSQL Required)](#event-sourced-layer-pekko--postgresql-required)
    - [LibSpiffy4j Bootstrap and Lifecycle](#libspiffy4j-bootstrap-and-lifecycle)
    - [WalletAggregate](#walletaggregate)
    - [InvoiceAggregate](#invoiceaggregate)
@@ -37,17 +53,17 @@
    - [ChannelWalletSaga](#channelwalletsaga)
    - [Read Models](#read-models)
    - [SecureStorage](#securestorage)
-6. [Internal APIs](#internal-apis-)
-7. [Common Patterns](#common-patterns)
-8. [Error Handling](#error-handling)
-9. [Testing Your Application](#testing-your-application)
-10. [Model Records Reference](#model-records-reference)
+8. [Internal APIs](#internal-apis-)
+9. [Common Patterns](#common-patterns)
+10. [Error Handling](#error-handling)
+11. [Testing Your Application](#testing-your-application)
+12. [Model Records Reference](#model-records-reference)
 
 ---
 
 ## Introduction
 
-libspiffy4j is an enterprise server-side BSV wallet library for the JVM. It builds on [bitcoin4j](https://github.com/twostack/bitcoin4j) (v1.7.0) to provide UTXO management, SPV validation, transaction broadcasting via ARC, event-sourced wallet state, payment channels, and invoicing.
+libspiffy4j is an enterprise server-side BSV wallet library for the JVM. It builds on [bitcoin4j](https://github.com/twostack/bitcoin4j) (v1.7.0) to provide UTXO management, SPV validation, transaction broadcasting via ARC, event-sourced wallet state, payment channels, invoicing, and a token plugin system.
 
 ### Three Usage Tiers
 
@@ -57,9 +73,9 @@ The library is organized into three tiers with increasing infrastructure require
 |------|----------|---------------|----------|
 | **Stateless Services** | `service` | None | Key derivation, tx building, ARC broadcast, SPV import |
 | **SPV Layer** | `spv` | None | Block headers, BEEF construction, merkle proofs |
-| **Event-Sourced** | `aggregate`, `projection`, `storage` | Pekko + PostgreSQL | Persistent wallet/invoice/channel state, read models |
+| **Event-Sourced** | `coordinator`, `aggregate`, `projection`, `storage` | Pekko + PostgreSQL | Persistent wallet/invoice/channel state, read models, plugin payments |
 
-You can use the first two tiers without any actor system or database. The event-sourced layer adds durable state management via Apache Pekko persistence and PostgreSQL.
+You can use the first two tiers without any actor system or database. The event-sourced layer adds durable state management via Apache Pekko persistence and PostgreSQL. **The Coordinator API is the recommended entry point for the event-sourced layer.**
 
 ### API Classification
 
@@ -105,7 +121,7 @@ var arc = new ArcService(ArcServiceConfig.taalMainnet());
 var response = arc.submitTransaction(result.rawHex());
 ```
 
-### Full Setup with LibSpiffy4j.builder()
+### Full Setup with Coordinator (Recommended)
 
 ```java
 import org.twostack.libspiffy4j.LibSpiffy4j;
@@ -118,22 +134,344 @@ var libSpiffy = LibSpiffy4j.builder()
     .dataSource(dataSource)
     .objectMapper(new ObjectMapper())
     .encryptionMasterKey(EncryptionService.generateMasterKey()) // 32 bytes
+    .registerPlugin(myTokenPlugin)       // optional: programmatic plugin registration
+    .enableServiceLoaderPlugins()        // optional: ServiceLoader discovery
     .build();
 
-// Access services
+// Access the coordinator -- the primary interface for the event-sourced layer
+var coordinator = libSpiffy.coordinator(); // ActorRef<CoordinatorCommand>
+
+// Create a wallet via the coordinator
+CompletionStage<CoordinatorReply> reply = AskPattern.ask(
+    coordinator,
+    replyTo -> new CoordinatorCommand.CreateWallet(
+        walletId, "My Wallet", WalletType.HD, NetworkType.MAINNET,
+        rootAddress, Map.of(), replyTo),
+    Duration.ofSeconds(10),
+    libSpiffy.system().scheduler()
+);
+
+// Access stateless services (these don't go through the coordinator)
 var crypto = libSpiffy.cryptoService();
 var encryption = libSpiffy.encryptionService();
 var txBuild = libSpiffy.transactionBuildService();
-var multisig = libSpiffy.multisigTransactionService();
-var utxoSplit = libSpiffy.utxoSplitService();
-var secureStorage = libSpiffy.secureStorage();
-
-// Access the Pekko actor system for aggregate commands
-var system = libSpiffy.system();
 
 // Graceful shutdown
 libSpiffy.close();
 ```
+
+---
+
+## Coordinator API (Recommended)
+
+### Overview
+
+The `WalletCoordinator` is a stateless Pekko Behavior that provides a unified command/reply API for all wallet, invoice, and payment operations. It is the **primary interface for the event-sourced layer**.
+
+> **All event-sourced operations should go through the Coordinator.** Direct aggregate interaction bypasses coordination logic and can leave the wallet in an inconsistent state (e.g., UTXOs spent without transactions recorded, or payments built without proper UTXO reservation).
+
+The coordinator:
+- Ensures wallet operations are properly sequenced (reserve UTXOs before building, record tx after signing)
+- Routes read queries directly to the CQRS read model (no aggregate involved)
+- Delegates plugin payment flows to the appropriate `TransactionBuilderPlugin`
+- Returns typed replies via `CoordinatorReply` (sealed interface)
+
+### Accessing the Coordinator
+
+```java
+var libSpiffy = LibSpiffy4j.builder()
+    .dataSource(dataSource)
+    .encryptionMasterKey(key)
+    .build();
+
+// The coordinator is an ActorRef<CoordinatorCommand>
+ActorRef<CoordinatorCommand> coordinator = libSpiffy.coordinator();
+
+// Use Pekko's AskPattern to send commands and receive replies
+CompletionStage<CoordinatorReply> reply = AskPattern.ask(
+    coordinator,
+    replyTo -> new CoordinatorCommand.CreateWallet(..., replyTo),
+    Duration.ofSeconds(10),
+    libSpiffy.system().scheduler()
+);
+```
+
+### Wallet Commands
+
+**CreateWallet** -- Initialize a new wallet:
+
+```java
+AskPattern.ask(coordinator,
+    replyTo -> new CoordinatorCommand.CreateWallet(
+        walletId, "My Wallet", WalletType.HD, NetworkType.MAINNET,
+        rootAddress, Map.of("source", "app"), replyTo),
+    Duration.ofSeconds(10), scheduler);
+// Reply: CoordinatorReply.WalletCreated
+```
+
+**RecordUtxo** -- Add a UTXO to a wallet:
+
+```java
+AskPattern.ask(coordinator,
+    replyTo -> new CoordinatorCommand.RecordUtxo(walletId, utxo, replyTo),
+    Duration.ofSeconds(10), scheduler);
+// Reply: CoordinatorReply.CommandAccepted
+```
+
+**RecordTransaction** -- Record a transaction in the wallet:
+
+```java
+AskPattern.ask(coordinator,
+    replyTo -> new CoordinatorCommand.RecordTransaction(walletId, transaction, replyTo),
+    Duration.ofSeconds(10), scheduler);
+// Reply: CoordinatorReply.CommandAccepted
+```
+
+**RecordAddress** -- Record a derived address:
+
+```java
+AskPattern.ask(coordinator,
+    replyTo -> new CoordinatorCommand.RecordAddress(walletId, addressMetadata, replyTo),
+    Duration.ofSeconds(10), scheduler);
+// Reply: CoordinatorReply.CommandAccepted
+```
+
+### Invoice Commands
+
+**CreateInvoice** -- Create a new invoice:
+
+```java
+AskPattern.ask(coordinator,
+    replyTo -> new CoordinatorCommand.CreateInvoice(
+        invoiceId, walletId,
+        List.of(paymentAddress),
+        50_000L,
+        List.of(new InvoiceOutputSpec.P2PKHOutputSpec(paymentAddress, 50_000L, "order-123")),
+        "Payment for Order #123",
+        Instant.now().plus(Duration.ofHours(24)),
+        Map.of("orderId", "123"),
+        replyTo),
+    Duration.ofSeconds(10), scheduler);
+// Reply: CoordinatorReply.InvoiceCreated
+```
+
+**MarkInvoicePaid** -- Record a payment against an invoice:
+
+```java
+AskPattern.ask(coordinator,
+    replyTo -> new CoordinatorCommand.MarkInvoicePaid(
+        invoiceId, paymentTxid, amountReceivedSats, paymentAddress, replyTo),
+    Duration.ofSeconds(10), scheduler);
+// Reply: CoordinatorReply.InvoicePaid
+```
+
+### Payment Commands
+
+**BuildPayment** -- Select UTXOs, build, and sign a transaction:
+
+```java
+AskPattern.ask(coordinator,
+    replyTo -> new CoordinatorCommand.BuildPayment(
+        walletId,
+        List.of(new InvoiceOutputSpec.P2PKHOutputSpec(recipientAddr, 50_000L, "payment")),
+        TransactionBuildConfig.standard(),
+        changeAddress,
+        replyTo),
+    Duration.ofSeconds(10), scheduler);
+// Reply: CoordinatorReply.PaymentBuilt (contains txid, rawHex, feeSats)
+```
+
+The coordinator handles the full payment lifecycle:
+1. Selects UTXOs from the wallet (via read model)
+2. Reserves selected UTXOs
+3. Builds and signs the transaction
+4. Records the transaction in the wallet
+5. Returns the signed transaction
+
+### Plugin Payment Commands
+
+**BuildPluginPayment** -- Delegate transaction building to a `TransactionBuilderPlugin`:
+
+```java
+AskPattern.ask(coordinator,
+    replyTo -> new CoordinatorCommand.BuildPluginPayment(
+        walletId,
+        "ordinals-plugin",          // pluginId
+        "mint",                      // action
+        Map.of(                      // pluginParams
+            "contentType", "image/png",
+            "data", base64Data
+        ),
+        TransactionBuildConfig.standard(),
+        changeAddress,
+        replyTo),
+    Duration.ofSeconds(10), scheduler);
+// Reply: CoordinatorReply.PluginPaymentBuilt
+```
+
+The coordinator resolves the plugin from the `PluginRegistry`, passes a `CallbackTransactionSigner` for secure signing, and handles UTXO reservation and transaction recording.
+
+### Read Queries
+
+Read queries go directly to the CQRS read model -- no aggregate is involved, and the coordinator does not load or replay events.
+
+**GetBalance:**
+
+```java
+AskPattern.ask(coordinator,
+    replyTo -> new CoordinatorCommand.GetBalance(walletId, replyTo),
+    Duration.ofSeconds(10), scheduler);
+// Reply: CoordinatorReply.BalanceResult
+```
+
+**GetTransactions:**
+
+```java
+AskPattern.ask(coordinator,
+    replyTo -> new CoordinatorCommand.GetTransactions(walletId, /*limit=*/50, /*offset=*/0, replyTo),
+    Duration.ofSeconds(10), scheduler);
+// Reply: CoordinatorReply.TransactionsResult
+```
+
+**GetUtxos:**
+
+```java
+AskPattern.ask(coordinator,
+    replyTo -> new CoordinatorCommand.GetUtxos(walletId, replyTo),
+    Duration.ofSeconds(10), scheduler);
+// Reply: CoordinatorReply.UtxosResult
+```
+
+### Handling Replies
+
+All coordinator commands return a `CoordinatorReply` (sealed interface). Always check for `Failure`:
+
+```java
+CompletionStage<CoordinatorReply> reply = AskPattern.ask(coordinator, ...);
+reply.whenComplete((result, error) -> {
+    if (error != null) {
+        // Pekko communication error (timeout, etc.)
+    } else if (result instanceof CoordinatorReply.Failure failure) {
+        // Domain error
+        System.err.println("Failed: " + failure.message());
+    } else if (result instanceof CoordinatorReply.WalletCreated created) {
+        System.out.println("Wallet created: " + created.walletId());
+    } else if (result instanceof CoordinatorReply.PaymentBuilt payment) {
+        System.out.println("Tx built: " + payment.txid());
+        // Broadcast via ARC
+        arc.submitTransaction(payment.rawHex());
+    }
+});
+```
+
+---
+
+## Token Plugin System
+
+The plugin system enables third-party extensions (e.g., ordinals, tokens, smart contracts) to participate in transaction building and script creation without accessing private keys directly.
+
+### ScriptPlugin
+
+Interface for plugins that generate custom locking/unlocking scripts:
+
+```java
+public interface ScriptPlugin {
+    String pluginId();
+    byte[] createLockingScript(Map<String, Object> params);
+    byte[] createUnlockingScript(Map<String, Object> params, byte[] signature);
+}
+```
+
+### TransactionBuilderPlugin
+
+Interface for plugins that build complete transactions with custom logic:
+
+```java
+public interface TransactionBuilderPlugin {
+    String pluginId();
+    TransactionBuildResult buildTransaction(
+        String action,
+        Map<String, Object> params,
+        List<BitcoinUtxo> availableUtxos,
+        TransactionBuildConfig config,
+        String changeAddress,
+        CallbackTransactionSigner signer
+    );
+}
+```
+
+The plugin receives a `CallbackTransactionSigner` for signing -- it never has access to private keys.
+
+### PluginRegistry
+
+Central registry for looking up plugins by ID:
+
+```java
+// Programmatic registration via the builder
+var libSpiffy = LibSpiffy4j.builder()
+    .dataSource(ds)
+    .encryptionMasterKey(key)
+    .registerPlugin(new MyOrdinalsPlugin())
+    .registerPlugin(new MyTokenPlugin())
+    .build();
+
+// Or register at runtime
+PluginRegistry registry = libSpiffy.pluginRegistry();
+registry.register(new AnotherPlugin());
+
+// Lookup
+Optional<TransactionBuilderPlugin> plugin = registry.getTransactionBuilderPlugin("ordinals-plugin");
+```
+
+### CallbackTransactionSigner
+
+Secure signing interface passed to plugins. The plugin requests signatures without ever seeing the private key:
+
+```java
+public interface CallbackTransactionSigner {
+    byte[] sign(byte[] rawTx, int inputIndex, long inputAmountSats);
+}
+```
+
+This ensures plugins cannot exfiltrate key material. The signer is scoped to the current wallet and transaction context.
+
+### PluginOutputSpec
+
+A new variant of `InvoiceOutputSpec` for plugin-managed outputs in invoices:
+
+```java
+// Create an invoice with plugin-managed outputs
+var pluginOutput = new InvoiceOutputSpec.PluginOutputSpec(
+    "ordinals-plugin",              // pluginId
+    50_000L,                         // amountSats
+    Map.of("contentType", "text/plain", "data", "hello world")
+);
+
+AskPattern.ask(coordinator,
+    replyTo -> new CoordinatorCommand.CreateInvoice(
+        invoiceId, walletId,
+        List.of(address),
+        50_000L,
+        List.of(pluginOutput),       // PluginOutputSpec in output list
+        "Ordinal inscription",
+        expiresAt, Map.of(), replyTo),
+    Duration.ofSeconds(10), scheduler);
+```
+
+### ServiceLoader Support
+
+Plugins can be discovered automatically via Java's `ServiceLoader` mechanism:
+
+```java
+// Enable in the builder
+var libSpiffy = LibSpiffy4j.builder()
+    .dataSource(ds)
+    .encryptionMasterKey(key)
+    .enableServiceLoaderPlugins()    // discovers plugins via META-INF/services
+    .build();
+```
+
+To make a plugin discoverable, create a file `META-INF/services/org.twostack.libspiffy4j.plugin.TransactionBuilderPlugin` containing the fully qualified class name of your plugin implementation.
 
 ---
 
@@ -276,6 +614,9 @@ new InvoiceOutputSpec.OPReturnOutputSpec(
     List.of("hello".getBytes()),      // data chunks (max 99KB total)
     false                              // separateOutputs
 )
+
+// Plugin-managed output (see Token Plugin System)
+new InvoiceOutputSpec.PluginOutputSpec("my-plugin", 50_000L, Map.of(...))
 ```
 
 ---
@@ -739,6 +1080,8 @@ List<Bump> bumps = beef.bumps();
 
 The event-sourced layer provides durable, auditable wallet state using Apache Pekko persistence with PostgreSQL. All state changes are captured as immutable events, enabling full history replay and temporal queries.
 
+> **Use the [Coordinator API](#coordinator-api-recommended) for all event-sourced operations.** The aggregates documented below are internal implementation details. They are retained here for reference, but application code should interact exclusively through the coordinator.
+
 ### LibSpiffy4j Bootstrap and Lifecycle
 
 ```java
@@ -748,6 +1091,8 @@ var libSpiffy = LibSpiffy4j.builder()
     .dataSource(dataSource)
     .objectMapper(new ObjectMapper())               // For JSON serialization
     .encryptionMasterKey(EncryptionService.generateMasterKey()) // Optional
+    .registerPlugin(myPlugin)                        // Optional: register plugins
+    .enableServiceLoaderPlugins()                    // Optional: ServiceLoader discovery
     .meterRegistry(meterRegistry)                    // Optional (Micrometer)
     .configOverride(customConfig)                    // Optional (Typesafe Config)
     .build();
@@ -756,12 +1101,17 @@ var libSpiffy = LibSpiffy4j.builder()
 The builder:
 1. Initializes the Pekko ActorSystem with JDBC persistence (PostgreSQL)
 2. Sets up cluster sharding for wallet, invoice, and channel aggregates
-3. Starts projection handlers that maintain read models
-4. Initializes crypto, encryption, and transaction services
+3. Starts the WalletCoordinator behavior
+4. Starts projection handlers that maintain read models
+5. Initializes crypto, encryption, and transaction services
+6. Registers plugins in the PluginRegistry
 
 **Lifecycle:**
 
 ```java
+// Access the coordinator (recommended)
+var coordinator = libSpiffy.coordinator();  // ActorRef<CoordinatorCommand>
+
 // Access services
 var system = libSpiffy.system();             // ActorSystem<Void>
 var crypto = libSpiffy.cryptoService();
@@ -770,6 +1120,7 @@ var secureStorage = libSpiffy.secureStorage();
 var txBuild = libSpiffy.transactionBuildService();
 var multisig = libSpiffy.multisigTransactionService();
 var utxoSplit = libSpiffy.utxoSplitService();
+var pluginRegistry = libSpiffy.pluginRegistry();
 
 // Graceful shutdown (30-second timeout)
 libSpiffy.close();
@@ -778,6 +1129,8 @@ libSpiffy.close();
 ---
 
 ### WalletAggregate
+
+> **Direct aggregate interaction is discouraged.** Use the [Coordinator API](#coordinator-api-recommended) instead. Sending commands directly to aggregates bypasses coordination logic and can leave the wallet in an inconsistent state (e.g., UTXOs spent without transactions recorded, or payments built without proper UTXO reservation).
 
 Event-sourced aggregate managing wallet state: addresses, UTXOs, transactions, and reservations. Interact via commands sent through Pekko's `ClusterSharding`.
 
@@ -823,6 +1176,8 @@ See [Wallet Lifecycle Guide](docs/wallet-lifecycle-guide.md) for detailed comman
 
 ### InvoiceAggregate
 
+> **Direct aggregate interaction is discouraged.** Use the [Coordinator API](#coordinator-api-recommended) instead. Sending commands directly to aggregates bypasses coordination logic and can leave the wallet in an inconsistent state (e.g., UTXOs spent without transactions recorded, or payments built without proper UTXO reservation).
+
 Event-sourced invoice lifecycle: creation, payment, expiration, and cancellation.
 
 **Commands:**
@@ -859,6 +1214,8 @@ See [Invoice Guide](docs/invoice-guide.md) for the full lifecycle.
 ---
 
 ### ChannelAggregate
+
+> **Direct aggregate interaction is discouraged.** Use the [Coordinator API](#coordinator-api-recommended) instead. Sending commands directly to aggregates bypasses coordination logic and can leave the wallet in an inconsistent state (e.g., UTXOs spent without transactions recorded, or payments built without proper UTXO reservation).
 
 Event-sourced payment channel state machine supporting the full lifecycle from negotiation through settlement.
 
@@ -905,7 +1262,7 @@ The saga runs automatically via Pekko projections. No direct interaction is need
 
 ### Read Models
 
-Read models provide optimized query access to aggregate state. They are updated asynchronously by projection handlers.
+Read models provide optimized query access to aggregate state. They are updated asynchronously by projection handlers. The [Coordinator API](#coordinator-api-recommended) uses these read models for `GetBalance`, `GetTransactions`, and `GetUtxos` queries.
 
 **WalletReadModelStorage:**
 
@@ -989,6 +1346,7 @@ The following are used internally by the library. Use only when building custom 
 - **WalletState / WalletEvent** -- Aggregate state and event types. Events are persisted by Pekko and replayed on recovery. State is rebuilt by folding events.
 - **InvoiceState / InvoiceEvent** -- Invoice aggregate internals.
 - **ChannelState / ChannelEvent** -- Channel aggregate internals.
+- **WalletCoordinator** -- The Pekko Behavior behind `libSpiffy.coordinator()`. Stateless; routes commands to aggregates and read models.
 - **Projection setup** -- `WalletProjectionHandler`, `InvoiceProjectionHandler`, `ChannelProjectionHandler` update read models from event streams.
 - **Serialization** -- CBOR-based serialization for Pekko persistence.
 - **ActorSystemFactory** -- Creates configured Pekko actor systems with JDBC persistence.
@@ -999,7 +1357,118 @@ The following are used internally by the library. Use only when building custom 
 
 ## Common Patterns
 
-### Wallet Creation -> Tx Build -> Broadcast -> SPV Confirm
+### Create Wallet, Build Payment, Broadcast (Coordinator)
+
+```java
+var coordinator = libSpiffy.coordinator();
+var scheduler = libSpiffy.system().scheduler();
+
+// 1. Create wallet via coordinator
+AskPattern.ask(coordinator,
+    replyTo -> new CoordinatorCommand.CreateWallet(
+        walletId, "My Wallet", WalletType.HD, NetworkType.MAINNET,
+        rootAddress, Map.of(), replyTo),
+    Duration.ofSeconds(10), scheduler);
+
+// 2. Record addresses (derive first, then record)
+var crypto = libSpiffy.cryptoService();
+var hdKey = crypto.mnemonicToHDPrivateKey(mnemonic, "");
+var key0 = crypto.derivePrivateKey(hdKey, 0, 0, 0, false);
+var addr0 = crypto.generateAddress(key0, NetworkType.MAINNET);
+
+AskPattern.ask(coordinator,
+    replyTo -> new CoordinatorCommand.RecordAddress(walletId, addressMetadata, replyTo),
+    Duration.ofSeconds(10), scheduler);
+
+// 3. Once UTXOs arrive, record them
+AskPattern.ask(coordinator,
+    replyTo -> new CoordinatorCommand.RecordUtxo(walletId, utxo, replyTo),
+    Duration.ofSeconds(10), scheduler);
+
+// 4. Build a payment (coordinator handles UTXO selection, reservation, signing, recording)
+CompletionStage<CoordinatorReply> paymentReply = AskPattern.ask(coordinator,
+    replyTo -> new CoordinatorCommand.BuildPayment(
+        walletId,
+        List.of(new InvoiceOutputSpec.P2PKHOutputSpec(recipientAddr, 50_000L, "payment")),
+        TransactionBuildConfig.standard(),
+        changeAddress,
+        replyTo),
+    Duration.ofSeconds(10), scheduler);
+
+paymentReply.thenAccept(reply -> {
+    if (reply instanceof CoordinatorReply.PaymentBuilt payment) {
+        // 5. Broadcast
+        var arc = new ArcService(ArcServiceConfig.taalMainnet());
+        arc.submitTransaction(payment.rawHex());
+    }
+});
+```
+
+### Invoice-Driven Payment Receipt (Coordinator)
+
+```java
+// 1. Create invoice via coordinator
+AskPattern.ask(coordinator,
+    replyTo -> new CoordinatorCommand.CreateInvoice(
+        invoiceId, walletId, List.of(paymentAddress), 50_000L,
+        List.of(new InvoiceOutputSpec.P2PKHOutputSpec(paymentAddress, 50_000L, "order")),
+        "Order #123", Instant.now().plus(Duration.ofHours(24)),
+        Map.of(), replyTo),
+    Duration.ofSeconds(10), scheduler);
+
+// 2. When a payment is detected on-chain:
+AskPattern.ask(coordinator,
+    replyTo -> new CoordinatorCommand.MarkInvoicePaid(
+        invoiceId, paymentTxid, amountReceivedSats, paymentAddress, replyTo),
+    Duration.ofSeconds(10), scheduler);
+
+// 3. Query via read model (through coordinator or directly)
+AskPattern.ask(coordinator,
+    replyTo -> new CoordinatorCommand.GetBalance(walletId, replyTo),
+    Duration.ofSeconds(10), scheduler);
+```
+
+### Plugin Payment (Token Mint Example)
+
+```java
+// 1. Register plugin at build time
+var libSpiffy = LibSpiffy4j.builder()
+    .dataSource(ds)
+    .encryptionMasterKey(key)
+    .registerPlugin(new OrdinalsPlugin())
+    .build();
+
+// 2. Build a plugin payment via coordinator
+AskPattern.ask(libSpiffy.coordinator(),
+    replyTo -> new CoordinatorCommand.BuildPluginPayment(
+        walletId,
+        "ordinals-plugin",
+        "mint",
+        Map.of("contentType", "image/png", "data", base64Data),
+        TransactionBuildConfig.standard(),
+        changeAddress,
+        replyTo),
+    Duration.ofSeconds(10), libSpiffy.system().scheduler());
+// Reply: CoordinatorReply.PluginPaymentBuilt
+```
+
+### Wallet Recovery from XPRIV
+
+```java
+var recoveryService = new WalletRecoveryService(
+    sharding, crypto, discoveryService, importService,
+    Duration.ofSeconds(30)
+);
+
+var result = recoveryService.recoverWallet(
+    walletId, "Recovered Wallet", hdKey, NetworkType.MAINNET,
+    20, System.out::println
+).toCompletableFuture().join();
+
+// Result contains discovered addresses, imported transactions, and UTXO count
+```
+
+### Stateless Tx Build, Broadcast, SPV Confirm (No Coordinator)
 
 ```java
 // 1. Create wallet
@@ -1036,43 +1505,6 @@ for (var tx : confirmed) {
 }
 ```
 
-### Invoice-Driven Payment Receipt
-
-```java
-// 1. Create invoice (event-sourced layer)
-invoiceRef.ask(replyTo -> new InvoiceCommand.CreateInvoiceCommand(
-    invoiceId, walletId, List.of(paymentAddress), 50_000L,
-    List.of(new InvoiceOutputSpec.P2PKHOutputSpec(paymentAddress, 50_000L, "order")),
-    "Order #123", Instant.now().plus(Duration.ofHours(24)),
-    Map.of(), replyTo
-), Duration.ofSeconds(10));
-
-// 2. Monitor for payment (in your application logic)
-// When a transaction paying to paymentAddress is detected:
-invoiceRef.ask(replyTo -> new InvoiceCommand.MarkInvoicePaidCommand(
-    invoiceId, paymentTxid, amountReceivedSats, replyTo
-), Duration.ofSeconds(10));
-
-// 3. Query via read model
-var invoice = invoiceStorage.findInvoice(dataSource, invoiceId);
-```
-
-### Wallet Recovery from XPRIV
-
-```java
-var recoveryService = new WalletRecoveryService(
-    sharding, crypto, discoveryService, importService,
-    Duration.ofSeconds(30)
-);
-
-var result = recoveryService.recoverWallet(
-    walletId, "Recovered Wallet", hdKey, NetworkType.MAINNET,
-    20, System.out::println
-).toCompletableFuture().join();
-
-// Result contains discovered addresses, imported transactions, and UTXO count
-```
-
 ---
 
 ## Error Handling
@@ -1102,9 +1534,27 @@ try {
 }
 ```
 
-### WalletReply.Failure
+### CoordinatorReply.Failure
 
-Aggregate commands return replies that may indicate failure:
+Coordinator commands return replies that may indicate failure:
+
+```java
+CompletionStage<CoordinatorReply> reply = AskPattern.ask(coordinator, ...);
+reply.whenComplete((result, error) -> {
+    if (error != null) {
+        // Pekko communication error (timeout, etc.)
+    } else if (result instanceof CoordinatorReply.Failure failure) {
+        // Domain error (duplicate wallet, unknown UTXO, insufficient funds, etc.)
+        System.err.println("Failed: " + failure.message());
+    } else {
+        // Success -- pattern match on specific reply type
+    }
+});
+```
+
+### WalletReply.Failure (Direct Aggregate -- Discouraged)
+
+If interacting with aggregates directly (not recommended):
 
 ```java
 CompletionStage<WalletReply> reply = walletRef.ask(...);
@@ -1171,13 +1621,14 @@ void testSpvValidation() {
 
 | Record | Package | Key Fields |
 |--------|---------|------------|
-| `BitcoinUtxo` | `model` | `txid`, `vout`, `valueSats`, `status`, `address`, `reservedByTxId`, `reservationExpiresAt` |
+| `BitcoinUtxo` | `model` | `txid`, `vout`, `valueSats`, `status`, `address`, `reservedByTxId`, `reservationExpiresAt`, `pluginId`, `pluginMetadata` |
 | `BitcoinTransaction` | `model` | `walletId`, `txid`, `status`, `direction`, `feeSats`, `netAmountSats`, `blockHeight` |
 | `PaymentChannel` | `model` | `channelId`, `walletId`, `role`, `state`, `clientBalanceSats`, `serverBalanceSats`, `fundingTxId` |
 | `Invoice` | `model` | `invoiceId`, `walletId`, `amountSats`, `status`, `addresses`, `outputs`, `expiresAt` |
 | `InvoiceOutputSpec.P2PKHOutputSpec` | `model` | `address`, `amountSats`, `label` |
 | `InvoiceOutputSpec.P2MSOutputSpec` | `model` | `publicKeys`, `threshold`, `amountSats` |
 | `InvoiceOutputSpec.OPReturnOutputSpec` | `model` | `dataChunks`, `separateOutputs` |
+| `InvoiceOutputSpec.PluginOutputSpec` | `model` | `pluginId`, `amountSats`, `pluginParams` |
 | `AddressMetadata` | `model` | `address`, `scriptType`, `derivationPath`, `derivationIndex`, `isChange` |
 | `WalletSummary` | `model` | `walletId`, `name`, `walletType`, `networkType`, `confirmedBalanceSats` |
 | `WalletBalance` | `model` | Spendable, reserved, and total balances |
