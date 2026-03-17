@@ -343,9 +343,19 @@ public final class WalletCoordinator {
             List<String> publicKeyHexes = List.of(
                     org.twostack.bitcoin4j.Utils.HEX.encode(signingKey.getPubKey()));
 
-            // 7. Build PluginTransactionRequest
+            // 7. Create TransactionLookup (resolves raw hex from wallet's read model)
+            TransactionLookup transactionLookup = txid -> {
+                try {
+                    return readModelStorage.findRawHexByTxid(dataSource, txid).orElse(null);
+                } catch (Exception e) {
+                    LOG.log(Level.WARNING, "Failed to look up transaction: " + txid, e);
+                    return null;
+                }
+            };
+
+            // 8. Build PluginTransactionRequest
             PluginTransactionRequest request = new PluginTransactionRequest(
-                    available, signer, publicKeyHexes, cmd.changeAddress(), cmd.pluginParams());
+                    available, signer, transactionLookup, publicKeyHexes, cmd.changeAddress(), cmd.pluginParams());
 
             // 8. Plugin builds the complete transaction
             TransactionBuilderResult result = plugin.buildTransaction(request);

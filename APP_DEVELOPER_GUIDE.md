@@ -23,6 +23,10 @@
    - [TransactionBuilderPlugin](#transactionbuilderplugin)
    - [PluginRegistry](#pluginregistry)
    - [CallbackTransactionSigner](#callbacktransactionsigner)
+   - [TransactionLookup](#transactionlookup)
+   - [PluginTransactionRequest](#plugintransactionrequest)
+   - [TransactionBuilderResult](#transactionbuilderresult)
+   - [Token Capture Pipeline](#token-capture-pipeline)
    - [PluginOutputSpec](#pluginoutputspec)
    - [ServiceLoader Support](#serviceloader-support)
 5. [Stateless Services (No Pekko Required)](#stateless-services-no-pekko-required)
@@ -309,7 +313,15 @@ AskPattern.ask(coordinator,
 // Reply: CoordinatorReply.PluginPaymentBuilt
 ```
 
-The coordinator resolves the plugin from the `PluginRegistry`, passes a `CallbackTransactionSigner` for secure signing, and handles UTXO reservation and transaction recording.
+The coordinator resolves the plugin from the `PluginRegistry`, then:
+
+1. Reads available UTXOs from the wallet's read model
+2. Creates a `CallbackTransactionSigner` closure (private key never exposed)
+3. Creates a `TransactionLookup` closure over the read model for transaction resolution
+4. Passes everything to the plugin via `PluginTransactionRequest`
+5. Validates the returned transaction via `plugin.validateTransactionStructure()`
+6. Auto-records wallet-owned output UTXOs (both standard P2PKH and plugin-identified)
+7. The projection layer subsequently enriches each UTXO with plugin metadata via `identifyScript()` + `extractMetadata()`
 
 ### Read Queries
 
@@ -368,50 +380,49 @@ reply.whenComplete((result, error) -> {
 
 ## Token Plugin System
 
-The plugin system enables third-party extensions (e.g., ordinals, tokens, smart contracts) to participate in transaction building and script creation without accessing private keys directly.
+The plugin system enables third-party token libraries (e.g., tstokenlib4j for TSL1 tokens) to participate in transaction building, script identification, and metadata extraction without accessing private keys directly. All data flows through the wallet's append-only log.
 
 ### ScriptPlugin
 
-Interface for plugins that generate custom locking/unlocking scripts:
+Base interface for plugins that identify, parse, and build custom locking/unlocking scripts:
 
 ```java
 public interface ScriptPlugin {
-    String pluginId();
-    byte[] createLockingScript(Map<String, Object> params);
-    byte[] createUnlockingScript(Map<String, Object> params, byte[] signature);
+    String pluginId();                                    // unique ID (e.g., "tsl1")
+    String displayName();                                 // human-readable name
+    List<String> scriptTypes();                           // script types handled (e.g., ["pp1_nft", "pp1_ft"])
+    String identifyScript(byte[] scriptPubKey);           // return script type or null
+    Map<String, Object> extractMetadata(byte[] scriptPubKey); // extract token metadata from script
+    byte[] createLockingScript(PluginLockSpec spec);      // build a locking script
+    byte[] createUnlockingScript(PluginUnlockSpec spec);  // build an unlocking script
 }
 ```
+
+The `extractMetadata()` method should include an `"ownerAddress"` key (base58 string) in the returned map -- the coordinator uses this to determine which outputs belong to the wallet.
 
 ### TransactionBuilderPlugin
 
-Interface for plugins that build complete transactions with custom logic:
+Extended interface for plugins that build complete multi-output transactions (e.g., TSL1's 5-output token structure). Extends `ScriptPlugin`:
 
 ```java
-public interface TransactionBuilderPlugin {
-    String pluginId();
-    TransactionBuildResult buildTransaction(
-        String action,
-        Map<String, Object> params,
-        List<BitcoinUtxo> availableUtxos,
-        TransactionBuildConfig config,
-        String changeAddress,
-        CallbackTransactionSigner signer
-    );
+public interface TransactionBuilderPlugin extends ScriptPlugin {
+    List<String> supportedActions();                                  // e.g., ["nft.issue", "nft.transfer"]
+    TransactionBuilderResult buildTransaction(PluginTransactionRequest request);
+    boolean validateTransactionStructure(byte[] rawTx, String action);
 }
 ```
 
-The plugin receives a `CallbackTransactionSigner` for signing -- it never has access to private keys.
+The plugin receives funding UTXOs, a signing callback, a transaction lookup, public keys, and plugin-specific parameters via `PluginTransactionRequest`. It returns a fully signed transaction without ever seeing the private key.
 
 ### PluginRegistry
 
-Central registry for looking up plugins by ID:
+Thread-safe registry for plugin discovery and lookup:
 
 ```java
 // Programmatic registration via the builder
 var libSpiffy = LibSpiffy4j.builder()
     .dataSource(ds)
     .encryptionMasterKey(key)
-    .registerPlugin(new MyOrdinalsPlugin())
     .registerPlugin(new MyTokenPlugin())
     .build();
 
@@ -420,20 +431,81 @@ PluginRegistry registry = libSpiffy.pluginRegistry();
 registry.register(new AnotherPlugin());
 
 // Lookup
-Optional<TransactionBuilderPlugin> plugin = registry.getTransactionBuilderPlugin("ordinals-plugin");
+Optional<TransactionBuilderPlugin> plugin = registry.getTransactionBuilderPlugin("tsl1");
+
+// Script identification (tries all registered plugins)
+Optional<PluginIdentification> id = registry.identifyScript(scriptPubKeyBytes);
+// Returns PluginIdentification(pluginId, scriptType) or empty
 ```
 
 ### CallbackTransactionSigner
 
-Secure signing interface passed to plugins. The plugin requests signatures without ever seeing the private key:
+Secure signing callback passed to plugins. The coordinator creates it by closing over the private key in a lambda -- the plugin can request signatures but cannot extract the key:
 
 ```java
+@FunctionalInterface
 public interface CallbackTransactionSigner {
-    byte[] sign(byte[] rawTx, int inputIndex, long inputAmountSats);
+    byte[] sign(byte[] sighash, int inputIndex);  // returns DER-encoded signature
 }
 ```
 
-This ensures plugins cannot exfiltrate key material. The signer is scoped to the current wallet and transaction context.
+### TransactionLookup
+
+Callback for resolving raw transaction hex from the wallet's read model. Ensures plugins retrieve transaction data through the wallet rather than receiving it externally:
+
+```java
+@FunctionalInterface
+public interface TransactionLookup {
+    String lookupRawHex(String txid);  // returns raw hex or null if not found
+}
+```
+
+The coordinator creates this by closing over the read model storage:
+
+```java
+TransactionLookup lookup = txid ->
+    readModelStorage.findRawHexByTxid(dataSource, txid).orElse(null);
+```
+
+Plugins use it to resolve parent transactions, witness transactions, and other context needed for transaction construction -- all from the wallet's own append-only log.
+
+### PluginTransactionRequest
+
+Request object passed to `TransactionBuilderPlugin.buildTransaction()`. Contains everything a plugin needs without direct key access:
+
+```java
+public record PluginTransactionRequest(
+    List<BitcoinUtxo> fundingUtxos,         // wallet's available UTXOs
+    CallbackTransactionSigner signer,       // secure signing callback (required)
+    TransactionLookup transactionLookup,    // wallet transaction resolution (nullable)
+    List<String> publicKeyHexes,            // hex-encoded public keys for unlock scripts
+    String changeAddress,                   // address for the change output
+    Map<String, Object> params              // plugin-specific parameters
+)
+```
+
+### TransactionBuilderResult
+
+Result from `TransactionBuilderPlugin.buildTransaction()`:
+
+```java
+public record TransactionBuilderResult(
+    String txid,      // transaction ID (double-SHA256, hex-encoded)
+    String rawHex,    // raw transaction hex
+    long feeSats      // fee paid in satoshis (>= 0)
+)
+```
+
+### Token Capture Pipeline
+
+When a transaction flows through the wallet (via `BuildPluginPayment` or `RecordTransaction`), the plugin system automatically captures token outputs:
+
+1. **Auto-record**: The coordinator parses the transaction's outputs and records wallet-owned UTXOs. For plugin-managed scripts, it calls `identifyScript()` + `extractMetadata()` to match `ownerAddress` against wallet addresses.
+2. **Event**: Each recorded UTXO emits a `UtxoReceivedEvent` through the event-sourced aggregate.
+3. **Projection enrichment**: The `WalletProjectionHandler` subscribes to `UtxoReceivedEvent` and calls `pluginRegistry.identifyScript()` + `plugin.extractMetadata()` on each UTXO's `scriptPubKey`. The `pluginId` and `pluginMetadata` fields are populated before persisting to the read model.
+4. **Query**: The enriched UTXOs are available via `GetUtxos` with `pluginId` and `pluginMetadata` populated -- applications can filter by `pluginId` to find token UTXOs.
+
+The `wallet_utxo` table stores `script_pub_key` so that retroactive identification is possible when new plugins are registered.
 
 ### PluginOutputSpec
 

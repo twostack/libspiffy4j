@@ -87,7 +87,8 @@ AskPattern.ask(coordinator,
 - AES-256-GCM encrypted key storage (HKDF context keys)
 - Event-sourced wallet, invoice, and payment channel aggregates
 - **Coordinator API** -- unified command/reply interface for the event-sourced layer
-- **Token Plugin System** -- ScriptPlugin, TransactionBuilderPlugin, PluginRegistry, CallbackTransactionSigner
+- **Token Plugin System** -- ScriptPlugin, TransactionBuilderPlugin, PluginRegistry, CallbackTransactionSigner, TransactionLookup
+- **Automatic token capture** -- projection layer enriches UTXOs with plugin metadata via `identifyScript()` + `extractMetadata()`
 - CQRS read models for wallets, invoices, and channels
 - Payment channel lifecycle (T1/T2/T3 transactions)
 - Wallet recovery from XPRIV

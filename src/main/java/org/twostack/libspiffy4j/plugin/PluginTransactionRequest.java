@@ -12,6 +12,11 @@ import java.util.Map;
  *
  * @param fundingUtxos UTXOs selected by libspiffy4j to fund the transaction
  * @param signer callback signer wrapping the private key (key never exposed)
+ * @param transactionLookup callback for resolving raw transaction hex from the wallet's
+ *                          read model — plugins use this to retrieve parent/witness transactions
+ *                          by txid rather than receiving external hex, keeping all data flowing
+ *                          through the wallet's append-only log. May be {@code null} if the
+ *                          coordinator does not support transaction lookup.
  * @param publicKeyHexes hex-encoded public keys for building unlock scripts
  * @param changeAddress address for the change output
  * @param params plugin-specific parameters (e.g., tokenId, action, recipientAddress)
@@ -19,6 +24,7 @@ import java.util.Map;
 public record PluginTransactionRequest(
         List<BitcoinUtxo> fundingUtxos,
         CallbackTransactionSigner signer,
+        TransactionLookup transactionLookup,
         List<String> publicKeyHexes,
         String changeAddress,
         Map<String, Object> params
