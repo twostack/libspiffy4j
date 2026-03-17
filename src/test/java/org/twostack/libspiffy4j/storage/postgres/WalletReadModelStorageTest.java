@@ -42,7 +42,8 @@ class WalletReadModelStorageTest {
         String[] scripts = {
                 "db/libspiffy4j/V003__create_projection_offset.sql",
                 "db/libspiffy4j/V004__create_wallet_read_models.sql",
-                "db/libspiffy4j/V007__add_raw_hex_to_wallet_transaction.sql"
+                "db/libspiffy4j/V007__add_raw_hex_to_wallet_transaction.sql",
+                "db/libspiffy4j/V008__add_plugin_fields.sql"
         };
         try (Connection conn = dataSource.getConnection();
              Statement stmt = conn.createStatement()) {
@@ -101,7 +102,7 @@ class WalletReadModelStorageTest {
 
         BitcoinUtxo utxo = new BitcoinUtxo("tx1", 0, 50000, "76a914...", "tb1qaddr",
                 UtxoStatus.AVAILABLE, 100, 6, Instant.now(), Instant.now(),
-                null, null, null, null, 0);
+                null, null, null, null, 0, null, null);
 
         try (Connection conn = dataSource.getConnection()) {
             conn.setAutoCommit(false);
@@ -121,10 +122,10 @@ class WalletReadModelStorageTest {
 
         BitcoinUtxo available = new BitcoinUtxo("tx1", 0, 30000, "script", "addr1",
                 UtxoStatus.AVAILABLE, 100, 3, Instant.now(), Instant.now(),
-                null, null, null, null, 0);
+                null, null, null, null, 0, null, null);
         BitcoinUtxo spent = new BitcoinUtxo("tx2", 0, 20000, "script", "addr2",
                 UtxoStatus.AVAILABLE, 100, 3, Instant.now(), Instant.now(),
-                null, null, null, null, 0);
+                null, null, null, null, 0, null, null);
 
         try (Connection conn = dataSource.getConnection()) {
             conn.setAutoCommit(false);
@@ -149,11 +150,11 @@ class WalletReadModelStorageTest {
         // Confirmed UTXO (available, confirmations > 0)
         BitcoinUtxo confirmed = new BitcoinUtxo("tx1", 0, 50000, "s", "a1",
                 UtxoStatus.AVAILABLE, 100, 6, Instant.now(), Instant.now(),
-                null, null, null, null, 0);
+                null, null, null, null, 0, null, null);
         // Unconfirmed UTXO (available, confirmations = 0)
         BitcoinUtxo unconfirmed = new BitcoinUtxo("tx2", 0, 30000, "s", "a2",
                 UtxoStatus.AVAILABLE, null, 0, Instant.now(), Instant.now(),
-                null, null, null, null, 0);
+                null, null, null, null, 0, null, null);
 
         try (Connection conn = dataSource.getConnection()) {
             conn.setAutoCommit(false);

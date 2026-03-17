@@ -3,6 +3,7 @@ package org.twostack.libspiffy4j.model;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Map;
 
 public record BitcoinUtxo(
         String txid,
@@ -19,7 +20,9 @@ public record BitcoinUtxo(
         Instant reservationExpiresAt,
         Integer reservationPriority,
         String reservationReason,
-        Integer derivationIndex
+        Integer derivationIndex,
+        String pluginId,
+        Map<String, Object> pluginMetadata
 ) {
 
     public BitcoinUtxo {
@@ -62,7 +65,7 @@ public record BitcoinUtxo(
                 UtxoStatus.RESERVED, blockHeight, confirmations,
                 createdAt, Instant.now(),
                 txId, expiresAt, priority, reason,
-                derivationIndex
+                derivationIndex, pluginId, pluginMetadata
         );
     }
 
@@ -72,7 +75,7 @@ public record BitcoinUtxo(
                 UtxoStatus.SPENT, blockHeight, confirmations,
                 createdAt, Instant.now(),
                 reservedByTxId, reservationExpiresAt, reservationPriority, reservationReason,
-                derivationIndex
+                derivationIndex, pluginId, pluginMetadata
         );
     }
 
@@ -82,7 +85,7 @@ public record BitcoinUtxo(
                 UtxoStatus.AVAILABLE, blockHeight, confirmations,
                 createdAt, Instant.now(),
                 null, null, null, null,
-                derivationIndex
+                derivationIndex, pluginId, pluginMetadata
         );
     }
 
@@ -96,7 +99,7 @@ public record BitcoinUtxo(
                 status, blockHeight, confirmations,
                 createdAt, Instant.now(),
                 reservedByTxId, newExpiresAt, reservationPriority, reservationReason,
-                derivationIndex
+                derivationIndex, pluginId, pluginMetadata
         );
     }
 
@@ -106,7 +109,7 @@ public record BitcoinUtxo(
                 status, blockHeight, newConfirmations,
                 createdAt, Instant.now(),
                 reservedByTxId, reservationExpiresAt, reservationPriority, reservationReason,
-                derivationIndex
+                derivationIndex, pluginId, pluginMetadata
         );
     }
 }

@@ -120,12 +120,12 @@ class WalletRecoveryServiceTest {
                 if ("tx1".equals(tx.txid())) {
                     return List.of(new BitcoinUtxo("tx1", 0, 50000, "script", "addr1",
                             UtxoStatus.AVAILABLE, 100000, null, Instant.now(), Instant.now(),
-                            null, null, null, null, 0));
+                            null, null, null, null, 0, null, null));
                 }
                 if ("tx3".equals(tx.txid())) {
                     return List.of(new BitcoinUtxo("tx3", 0, 30000, "script", "addr2",
                             UtxoStatus.AVAILABLE, 100002, null, Instant.now(), Instant.now(),
-                            null, null, null, null, 1));
+                            null, null, null, null, 1, null, null));
                 }
                 return List.of();
             }

@@ -279,7 +279,7 @@ public final class WalletRecoveryService {
                                 outputAddress, UtxoStatus.AVAILABLE,
                                 itx.spvValid() ? (int) itx.blockHeight() : null,
                                 null, Instant.now(), Instant.now(),
-                                null, null, null, null, null);
+                                null, null, null, null, null, null, null);
                         result.add(utxo);
                     }
                 } catch (Exception e) {

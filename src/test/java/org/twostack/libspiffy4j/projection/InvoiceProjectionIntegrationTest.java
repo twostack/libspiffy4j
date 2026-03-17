@@ -265,7 +265,9 @@ class InvoiceProjectionIntegrationTest {
                 "db/libspiffy4j/V003__create_projection_offset.sql",
                 "db/libspiffy4j/V004__create_wallet_read_models.sql",
                 "db/libspiffy4j/V005__create_secure_storage.sql",
-                "db/libspiffy4j/V006__create_invoice_read_models.sql"
+                "db/libspiffy4j/V006__create_invoice_read_models.sql",
+                "db/libspiffy4j/V007__add_raw_hex_to_wallet_transaction.sql",
+                "db/libspiffy4j/V008__add_plugin_fields.sql"
         };
         try (Connection conn = ds.getConnection();
              Statement stmt = conn.createStatement()) {

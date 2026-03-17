@@ -12,7 +12,7 @@ class BitcoinUtxoTest {
             "abc123", 0, 50000L, "76a914...88ac", "1Address",
             UtxoStatus.AVAILABLE, null, null,
             Instant.now(), Instant.now(),
-            null, null, null, null, null
+            null, null, null, null, null, null, null
         );
     }
 
@@ -76,28 +76,28 @@ class BitcoinUtxoTest {
     @Test void validation_rejectsNullTxid() {
         assertThatThrownBy(() -> new BitcoinUtxo(
             null, 0, 50000L, null, null, UtxoStatus.AVAILABLE,
-            null, null, null, null, null, null, null, null, null
+            null, null, null, null, null, null, null, null, null, null, null
         )).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test void validation_rejectsBlankTxid() {
         assertThatThrownBy(() -> new BitcoinUtxo(
             "  ", 0, 50000L, null, null, UtxoStatus.AVAILABLE,
-            null, null, null, null, null, null, null, null, null
+            null, null, null, null, null, null, null, null, null, null, null
         )).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test void validation_rejectsNegativeValueSats() {
         assertThatThrownBy(() -> new BitcoinUtxo(
             "abc", 0, -1L, null, null, UtxoStatus.AVAILABLE,
-            null, null, null, null, null, null, null, null, null
+            null, null, null, null, null, null, null, null, null, null, null
         )).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test void validation_rejectsNegativeVout() {
         assertThatThrownBy(() -> new BitcoinUtxo(
             "abc", -1, 50000L, null, null, UtxoStatus.AVAILABLE,
-            null, null, null, null, null, null, null, null, null
+            null, null, null, null, null, null, null, null, null, null, null
         )).isInstanceOf(IllegalArgumentException.class);
     }
 }

@@ -133,7 +133,7 @@ class WalletProjectionIntegrationTest {
 
         BitcoinUtxo utxo = new BitcoinUtxo("txbal1", 0, 100000, "script", "addr",
                 UtxoStatus.AVAILABLE, 500, 6, Instant.now(), Instant.now(),
-                null, null, null, null, 0);
+                null, null, null, null, 0, null, null);
         walletRef(walletId).tell(new WalletCommand.RecordUtxoCommand(walletId, utxo, probe.ref()));
         probe.receiveMessage(TIMEOUT);
 
@@ -157,7 +157,7 @@ class WalletProjectionIntegrationTest {
 
         BitcoinUtxo utxo = new BitcoinUtxo("txlife1", 0, 75000, "script", "addr",
                 UtxoStatus.AVAILABLE, 100, 3, Instant.now(), Instant.now(),
-                null, null, null, null, 0);
+                null, null, null, null, 0, null, null);
         walletRef(walletId).tell(new WalletCommand.RecordUtxoCommand(walletId, utxo, probe.ref()));
         probe.receiveMessage(TIMEOUT);
 
@@ -211,7 +211,7 @@ class WalletProjectionIntegrationTest {
 
         BitcoinUtxo utxo = new BitcoinUtxo("txidem", 0, 40000, "script", "addr",
                 UtxoStatus.AVAILABLE, 100, 1, Instant.now(), Instant.now(),
-                null, null, null, null, 0);
+                null, null, null, null, 0, null, null);
         walletRef(walletId).tell(new WalletCommand.RecordUtxoCommand(walletId, utxo, probe.ref()));
         probe.receiveMessage(TIMEOUT);
 
@@ -295,7 +295,7 @@ class WalletProjectionIntegrationTest {
         for (int i = 0; i < 3; i++) {
             BitcoinUtxo utxo = new BitcoinUtxo("txrec" + i, 0, 25000 * (i + 1), "s", "a",
                     UtxoStatus.AVAILABLE, 100, 3, Instant.now(), Instant.now(),
-                    null, null, null, null, 0);
+                    null, null, null, null, 0, null, null);
             walletRef(walletId).tell(new WalletCommand.RecordUtxoCommand(walletId, utxo, probe.ref()));
             probe.receiveMessage(TIMEOUT);
         }
@@ -315,7 +315,8 @@ class WalletProjectionIntegrationTest {
                 "db/libspiffy4j/V002__create_snapshot.sql",
                 "db/libspiffy4j/V003__create_projection_offset.sql",
                 "db/libspiffy4j/V004__create_wallet_read_models.sql",
-                "db/libspiffy4j/V007__add_raw_hex_to_wallet_transaction.sql"
+                "db/libspiffy4j/V007__add_raw_hex_to_wallet_transaction.sql",
+                "db/libspiffy4j/V008__add_plugin_fields.sql"
         };
         try (Connection conn = ds.getConnection();
              Statement stmt = conn.createStatement()) {

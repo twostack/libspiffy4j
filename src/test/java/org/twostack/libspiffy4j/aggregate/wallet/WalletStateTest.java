@@ -25,7 +25,7 @@ class WalletStateTest {
         return new BitcoinUtxo(txid, vout, valueSats, "76a914...", "tb1qaddr",
                 UtxoStatus.AVAILABLE, confirmations != null && confirmations > 0 ? 100 : null,
                 confirmations, Instant.now(), Instant.now(),
-                null, null, null, null, 0);
+                null, null, null, null, 0, null, null);
     }
 
     @Test

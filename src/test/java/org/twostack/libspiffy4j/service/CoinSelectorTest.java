@@ -18,7 +18,7 @@ class CoinSelectorTest {
     private BitcoinUtxo utxo(String txid, long valueSats) {
         return new BitcoinUtxo(txid, 0, valueSats, "76a914...88ac", "1Address",
                 UtxoStatus.AVAILABLE, null, null, Instant.now(), Instant.now(),
-                null, null, null, null, null);
+                null, null, null, null, null, null, null);
     }
 
     @Test

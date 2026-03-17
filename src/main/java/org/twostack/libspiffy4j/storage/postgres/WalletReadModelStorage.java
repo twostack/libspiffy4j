@@ -66,13 +66,15 @@ public class WalletReadModelStorage {
 
     public void upsertWalletUtxo(Connection conn, String walletId, BitcoinUtxo utxo) throws SQLException {
         String sql = """
-                INSERT INTO wallet_utxo (wallet_id, txid, vout, value_sats, address, status, block_height, confirmations, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO wallet_utxo (wallet_id, txid, vout, value_sats, address, status, block_height, confirmations, created_at, updated_at, plugin_id, plugin_metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)
                 ON CONFLICT (wallet_id, txid, vout) DO UPDATE SET
                     status = EXCLUDED.status,
                     block_height = EXCLUDED.block_height,
                     confirmations = EXCLUDED.confirmations,
-                    updated_at = EXCLUDED.updated_at
+                    updated_at = EXCLUDED.updated_at,
+                    plugin_id = COALESCE(EXCLUDED.plugin_id, wallet_utxo.plugin_id),
+                    plugin_metadata = COALESCE(EXCLUDED.plugin_metadata, wallet_utxo.plugin_metadata)
                 """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, walletId);
@@ -93,6 +95,16 @@ public class WalletReadModelStorage {
             }
             ps.setTimestamp(9, Timestamp.from(utxo.createdAt()));
             ps.setTimestamp(10, Timestamp.from(utxo.updatedAt()));
+            if (utxo.pluginId() != null) {
+                ps.setString(11, utxo.pluginId());
+            } else {
+                ps.setNull(11, Types.VARCHAR);
+            }
+            if (utxo.pluginMetadata() != null && !utxo.pluginMetadata().isEmpty()) {
+                ps.setString(12, toJson(utxo.pluginMetadata()));
+            } else {
+                ps.setNull(12, Types.VARCHAR);
+            }
             ps.executeUpdate();
         }
         updateUtxoCount(conn, walletId);
@@ -439,6 +451,8 @@ public class WalletReadModelStorage {
         Integer blockHeight = rs.getObject("block_height", Integer.class);
         Integer confirmations = rs.getObject("confirmations", Integer.class);
         Timestamp resExpires = rs.getTimestamp("reservation_expires_at");
+        String pluginId = rs.getString("plugin_id");
+        Map<String, Object> pluginMetadata = parsePluginMetadata(rs.getString("plugin_metadata"));
         return new BitcoinUtxo(
                 rs.getString("txid"),
                 rs.getInt("vout"),
@@ -452,7 +466,8 @@ public class WalletReadModelStorage {
                 rs.getTimestamp("updated_at").toInstant(),
                 rs.getString("reserved_by_tx_id"),
                 resExpires != null ? resExpires.toInstant() : null,
-                null, null, null
+                null, null, null,
+                pluginId, pluginMetadata
         );
     }
 
@@ -477,6 +492,37 @@ public class WalletReadModelStorage {
                 rs.getTimestamp("updated_at").toInstant(),
                 null, 0, 0
         );
+    }
+
+    // ── Plugin queries ──
+
+    public List<BitcoinUtxo> findUtxosByPlugin(DataSource ds, String walletId,
+                                                String pluginId) throws SQLException {
+        String sql = "SELECT * FROM wallet_utxo WHERE wallet_id = ? AND plugin_id = ? AND status != 'SPENT' ORDER BY created_at DESC";
+        try (Connection conn = ds.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, walletId);
+            ps.setString(2, pluginId);
+            try (ResultSet rs = ps.executeQuery()) {
+                List<BitcoinUtxo> results = new ArrayList<>();
+                while (rs.next()) {
+                    results.add(mapUtxo(rs));
+                }
+                return results;
+            }
+        }
+    }
+
+    // ── Private helpers ──
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> parsePluginMetadata(String json) {
+        if (json == null || json.isBlank()) return null;
+        try {
+            return MAPPER.readValue(json, Map.class);
+        } catch (JsonProcessingException e) {
+            return Map.of();
+        }
     }
 
     private String toJson(Map<String, Object> map) {

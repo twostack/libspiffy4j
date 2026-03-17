@@ -145,7 +145,8 @@ public class EventSourcedWalletExample {
             UtxoStatus.AVAILABLE,
             850_000, 6,
             Instant.now(), Instant.now(),
-            null, null, null, null, 0
+            null, null, null, null, 0,
+            null, null
         );
 
         walletRef.ask(

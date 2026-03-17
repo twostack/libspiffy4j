@@ -38,7 +38,7 @@ class TransactionBuildServiceTest {
     private BitcoinUtxo utxo(String txid, long valueSats) {
         return new BitcoinUtxo(txid, 0, valueSats, "76a914" + "ab".repeat(20) + "88ac",
                 senderAddress, UtxoStatus.AVAILABLE, 100, 6,
-                Instant.now(), Instant.now(), null, null, null, null, 0);
+                Instant.now(), Instant.now(), null, null, null, null, 0, null, null);
     }
 
     @Test

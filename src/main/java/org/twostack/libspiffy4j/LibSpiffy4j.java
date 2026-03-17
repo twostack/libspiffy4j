@@ -1,7 +1,10 @@
 package org.twostack.libspiffy4j;
 
+import org.apache.pekko.actor.typed.ActorRef;
 import org.apache.pekko.actor.typed.ActorSystem;
 import org.twostack.libspiffy4j.config.DataSourceRegistry;
+import org.twostack.libspiffy4j.coordinator.CoordinatorCommand;
+import org.twostack.libspiffy4j.plugin.PluginRegistry;
 import org.twostack.libspiffy4j.service.CryptoService;
 import org.twostack.libspiffy4j.service.EncryptionService;
 import org.twostack.libspiffy4j.service.MultisigTransactionService;
@@ -29,6 +32,8 @@ public final class LibSpiffy4j implements AutoCloseable {
     private final TransactionBuildService transactionBuildService;
     private final MultisigTransactionService multisigTransactionService;
     private final UtxoSplitService utxoSplitService;
+    private final PluginRegistry pluginRegistry;
+    private final ActorRef<CoordinatorCommand> coordinator;
     private volatile boolean closed;
 
     static String nextSystemName() {
@@ -39,7 +44,9 @@ public final class LibSpiffy4j implements AutoCloseable {
                 EncryptionService encryptionService, SecureStorage secureStorage,
                 TransactionBuildService transactionBuildService,
                 MultisigTransactionService multisigTransactionService,
-                UtxoSplitService utxoSplitService) {
+                UtxoSplitService utxoSplitService,
+                PluginRegistry pluginRegistry,
+                ActorRef<CoordinatorCommand> coordinator) {
         this.system = system;
         this.systemName = system.name();
         this.cryptoService = cryptoService;
@@ -48,6 +55,8 @@ public final class LibSpiffy4j implements AutoCloseable {
         this.transactionBuildService = transactionBuildService;
         this.multisigTransactionService = multisigTransactionService;
         this.utxoSplitService = utxoSplitService;
+        this.pluginRegistry = pluginRegistry;
+        this.coordinator = coordinator;
     }
 
     public static LibSpiffy4jBuilder builder() {
@@ -83,6 +92,16 @@ public final class LibSpiffy4j implements AutoCloseable {
 
     public UtxoSplitService utxoSplitService() {
         return utxoSplitService;
+    }
+
+    /** Returns the plugin registry with all registered script plugins. */
+    public PluginRegistry pluginRegistry() {
+        return pluginRegistry;
+    }
+
+    /** Returns the coordinator actor for sending commands. */
+    public ActorRef<CoordinatorCommand> coordinator() {
+        return coordinator;
     }
 
     @Override

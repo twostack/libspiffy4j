@@ -53,6 +53,7 @@ class InvoiceOutputSpecTest {
             case InvoiceOutputSpec.P2PKHOutputSpec p -> "p2pkh";
             case InvoiceOutputSpec.P2MSOutputSpec p -> "p2ms";
             case InvoiceOutputSpec.OPReturnOutputSpec p -> "op_return";
+            case InvoiceOutputSpec.PluginOutputSpec p -> "plugin";
         };
         assertThat(result).isEqualTo("p2pkh");
     }

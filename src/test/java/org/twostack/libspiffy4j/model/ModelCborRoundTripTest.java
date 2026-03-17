@@ -34,7 +34,7 @@ class ModelCborRoundTripTest {
         var utxo = new BitcoinUtxo("txid1", 0, 50000, "script", "addr",
             UtxoStatus.AVAILABLE, 100, 6,
             Instant.parse("2025-01-01T00:00:00Z"), Instant.parse("2025-01-01T00:00:00Z"),
-            null, null, null, null, 0);
+            null, null, null, null, 0, null, null);
         var result = roundTrip(utxo, BitcoinUtxo.class);
         assertThat(result).isEqualTo(utxo);
     }
@@ -149,7 +149,7 @@ class ModelCborRoundTripTest {
     @Test void nullOptionalFields() throws Exception {
         var utxo = new BitcoinUtxo("txid1", 0, 0, null, null,
             UtxoStatus.PENDING, null, null, null, null,
-            null, null, null, null, null);
+            null, null, null, null, null, null, null);
         var result = roundTrip(utxo, BitcoinUtxo.class);
         assertThat(result.blockHeight()).isNull();
         assertThat(result.address()).isNull();

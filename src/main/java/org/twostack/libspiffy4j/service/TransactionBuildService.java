@@ -11,6 +11,9 @@ import org.twostack.libspiffy4j.model.BitcoinUtxo;
 import org.twostack.libspiffy4j.model.InvoiceOutputSpec;
 import org.twostack.libspiffy4j.model.TransactionBuildConfig;
 import org.twostack.libspiffy4j.model.TransactionBuildResult;
+import org.twostack.libspiffy4j.plugin.PluginLockSpec;
+import org.twostack.libspiffy4j.plugin.PluginRegistry;
+import org.twostack.libspiffy4j.plugin.ScriptPlugin;
 
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
@@ -29,10 +32,16 @@ public final class TransactionBuildService {
 
     private final CryptoService cryptoService;
     private final CoinSelector coinSelector;
+    private final PluginRegistry pluginRegistry;
+
+    public TransactionBuildService(CryptoService cryptoService, PluginRegistry pluginRegistry) {
+        this.cryptoService = cryptoService;
+        this.pluginRegistry = pluginRegistry;
+        this.coinSelector = new CoinSelector();
+    }
 
     public TransactionBuildService(CryptoService cryptoService) {
-        this.cryptoService = cryptoService;
-        this.coinSelector = new CoinSelector();
+        this(cryptoService, null);
     }
 
     public TransactionBuildResult buildTransaction(
@@ -234,6 +243,17 @@ public final class TransactionBuildService {
                         .toList();
                 builder.spendTo(new UnspendableDataLockBuilder(buffers), BigInteger.ZERO);
             }
+            case InvoiceOutputSpec.PluginOutputSpec plugin -> {
+                if (pluginRegistry == null) {
+                    throw new IllegalStateException("PluginRegistry required for plugin outputs");
+                }
+                ScriptPlugin p = pluginRegistry.getPlugin(plugin.pluginId())
+                        .orElseThrow(() -> new IllegalArgumentException("Plugin not found: " + plugin.pluginId()));
+                byte[] lockScript = p.createLockingScript(new PluginLockSpec(
+                        plugin.pluginId(), plugin.pluginScriptType(), plugin.amountSats(), plugin.params()));
+                builder.spendTo(new DefaultLockBuilder(new org.twostack.bitcoin4j.script.Script(lockScript)),
+                        BigInteger.valueOf(plugin.amountSats()));
+            }
         }
     }
 
@@ -244,6 +264,7 @@ public final class TransactionBuildService {
                 case InvoiceOutputSpec.P2PKHOutputSpec p -> p.amountSats();
                 case InvoiceOutputSpec.P2MSOutputSpec p -> p.amountSats();
                 case InvoiceOutputSpec.OPReturnOutputSpec ignored -> 0;
+                case InvoiceOutputSpec.PluginOutputSpec p -> p.amountSats();
             };
         }
         return total;

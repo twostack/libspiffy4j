@@ -73,6 +73,10 @@ public class InvoiceReadModelStorage {
             case InvoiceOutputSpec.OPReturnOutputSpec opReturn -> {
                 outputType = "op_return";
             }
+            case InvoiceOutputSpec.PluginOutputSpec plugin -> {
+                outputType = "plugin";
+                amountSats = plugin.amountSats();
+            }
         }
 
         String sql = """
