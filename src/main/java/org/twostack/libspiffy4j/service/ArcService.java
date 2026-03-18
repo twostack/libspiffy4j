@@ -101,29 +101,17 @@ public class ArcService {
 
     /**
      * Gets the merkle proof for a mined transaction.
+     * ARC returns the merkle path inline in the {@code GET /v1/tx/{txid}} response —
+     * there is no separate merkle proof endpoint.
      */
     public MerkleProofData getMerkleProof(String txid) {
-        try {
-            var builder = HttpRequest.newBuilder()
-                    .uri(URI.create(config.baseUrl() + "/v1/tx/" + txid + "/merklepath"))
-                    .GET();
-
-            addAuthHeader(builder);
-
-            HttpResponse<String> response = httpClient.send(builder.build(),
-                    HttpResponse.BodyHandlers.ofString());
-
-            if (response.statusCode() >= 400) {
-                throw new ArcServiceException("ARC merkle proof request failed with status " + response.statusCode(),
-                        response.statusCode(), response.body());
-            }
-
-            return parseMerkleProofResponse(response.body());
-        } catch (ArcServiceException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new ArcServiceException("Failed to get merkle proof", e);
+        ArcTransactionResponse response = queryTransaction(txid);
+        if (response.merklePath() == null || response.merklePath().isBlank()) {
+            throw new ArcServiceException("No merkle path available for transaction: " + txid, 0, null);
         }
+        byte[] merklePathBytes = HexFormat.of().parseHex(response.merklePath());
+        Bump bump = Bump.parse(merklePathBytes);
+        return new MerkleProofData(bump, response.blockHeight());
     }
 
     private void addAuthHeader(HttpRequest.Builder builder) {
@@ -150,14 +138,6 @@ public class ArcService {
         String merklePath = extractJsonString(json, "merklePath");
         ArcTransactionStatus status = ArcTransactionStatus.fromCode(statusCode);
         return new ArcTransactionResponse(txid, status, blockHeight, blockHash, timestamp, merklePath);
-    }
-
-    private MerkleProofData parseMerkleProofResponse(String json) {
-        String merklePathHex = extractJsonString(json, "merklePath");
-        long blockHeight = extractJsonLong(json, "blockHeight");
-        byte[] merklePathBytes = HexFormat.of().parseHex(merklePathHex);
-        Bump bump = Bump.parse(merklePathBytes);
-        return new MerkleProofData(bump, blockHeight);
     }
 
     static String extractJsonString(String json, String key) {

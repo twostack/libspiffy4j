@@ -119,15 +119,16 @@ class ArcServiceTest {
     }
 
     @Test
-    void getMerkleProof_parsesResponse() {
+    void getMerkleProof_parsesFromQueryResponse() {
         // A minimal valid BUMP: blockHeight=1 (varint 01), treeHeight=1 (01),
         // 1 leaf at level 0: nLeaves=1 (01), offset=0 (00), flags=02 (isTxid),
         // hash = 32 zero bytes
         String bumpHex = "01" + "01" + "01" + "00" + "02"
                 + "0000000000000000000000000000000000000000000000000000000000000000";
 
+        // getMerkleProof calls queryTransaction internally — mock a full tx response
         server.enqueue(new MockResponse()
-                .setBody("{\"merklePath\":\"" + bumpHex + "\",\"blockHeight\":1}")
+                .setBody("{\"txid\":\"sometxid\",\"txStatus\":9,\"blockHeight\":1,\"blockHash\":\"hash\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"merklePath\":\"" + bumpHex + "\"}")
                 .setHeader("Content-Type", "application/json"));
 
         MerkleProofData proof = arcService.getMerkleProof("sometxid");
