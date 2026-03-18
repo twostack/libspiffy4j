@@ -117,12 +117,20 @@ public final class WalletSigningActor extends AbstractBehavior<WalletSigningActo
             int coinType = (cmd.networkType() == NetworkType.MAINNET) ? 236 : 1;
             org.twostack.bitcoin4j.params.NetworkType bitcoin4jNetwork = toBitcoin4jNetworkType(cmd.networkType());
 
+            LOG.info("PrepareSigner for wallet " + cmd.walletId()
+                    + " — " + cmd.fundingUtxos().size() + " UTXOs, "
+                    + cmd.addressToDerivationIndex().size() + " address mappings");
+
             // Try HD key first
             Optional<EncryptedKeyRecord> hdRecord =
                     secureStorage.loadEncryptedKey(dataSource, cmd.walletId(), "hdkey");
             if (hdRecord.isPresent()) {
+                LOG.info("Found HD key for wallet " + cmd.walletId());
                 DeterministicKey hdKey = decryptHDKey(hdRecord.get(), cmd.walletId(), bitcoin4jNetwork);
-                cmd.replyTo().tell(prepareHDSigner(hdKey, cmd, coinType));
+                SignerReady ready = prepareHDSigner(hdKey, cmd, coinType);
+                LOG.info("HD signer ready — " + ready.publicKeyHexes().size() + " public keys: "
+                        + ready.publicKeyHexes());
+                cmd.replyTo().tell(ready);
                 return this;
             }
 
@@ -130,11 +138,13 @@ public final class WalletSigningActor extends AbstractBehavior<WalletSigningActo
             Optional<EncryptedKeyRecord> wifRecord =
                     secureStorage.loadEncryptedKey(dataSource, cmd.walletId(), "wif");
             if (wifRecord.isPresent()) {
+                LOG.info("Found WIF key for wallet " + cmd.walletId());
                 org.twostack.bitcoin4j.ECKey ecKey = decryptWIFKey(wifRecord.get(), cmd.walletId());
                 cmd.replyTo().tell(prepareWIFSigner(ecKey));
                 return this;
             }
 
+            LOG.warning("No signing key found for wallet: " + cmd.walletId());
             cmd.replyTo().tell(new SigningFailure("No signing key found for wallet: " + cmd.walletId()));
         } catch (Exception e) {
             cmd.replyTo().tell(new SigningFailure("Signing preparation failed: " + e.getMessage()));
@@ -152,13 +162,18 @@ public final class WalletSigningActor extends AbstractBehavior<WalletSigningActo
 
         // Build signer closure — derives the correct child key per input
         CallbackTransactionSigner signer = (sighash, inputIndex) -> {
+            LOG.info("Signer called for inputIndex=" + inputIndex
+                    + " sighash=" + Utils.HEX.encode(sighash).substring(0, 16) + "...");
             String address = fundingUtxos.get(inputIndex).address();
             int derivIdx = addressToIndex.getOrDefault(address, 0);
+            LOG.info("  address=" + address + " derivIdx=" + derivIdx);
             DeterministicKey childKey = cryptoService.derivePrivateKey(hdKey, 0, derivIdx, coinType, false);
             org.twostack.bitcoin4j.ECKey ecKey =
                     org.twostack.bitcoin4j.ECKey.fromPrivate(childKey.getPrivKeyBytes(), true);
+            LOG.info("  pubKey=" + Utils.HEX.encode(ecKey.getPubKey()));
             org.twostack.bitcoin4j.ECKey.ECDSASignature sig =
                     ecKey.sign(Sha256Hash.wrap(sighash));
+            LOG.info("  signature produced, DER length=" + sig.encodeToDER().length);
             return sig.encodeToDER();
         };
 

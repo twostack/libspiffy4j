@@ -36,7 +36,8 @@ public sealed interface CoordinatorReply permits
 
     record PaymentBuilt(TransactionBuildResult result) implements CoordinatorReply {}
 
-    record PluginPaymentBuilt(String txid, String rawHex, long feeSats) implements CoordinatorReply {}
+    record PluginPaymentBuilt(String txid, String rawHex, long feeSats,
+                               java.util.List<String> spentUtxoKeys) implements CoordinatorReply {}
 
     record CommandAccepted(String message) implements CoordinatorReply {}
 

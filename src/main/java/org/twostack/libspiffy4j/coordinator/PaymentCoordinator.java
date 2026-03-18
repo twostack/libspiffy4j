@@ -136,15 +136,11 @@ public final class PaymentCoordinator {
                 return;
             }
 
-            // 11. Auto-record wallet-owned output UTXOs
-            autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
-                    cmd.walletId(), result.txid(), result.rawHex(), addressToIndex);
-
-            // 12. Mark consumed input UTXOs as spent
-            markSpentInputs(ctx, cmd.walletId(), result.rawHex(), available);
+            // 11. Identify consumed input UTXOs (caller marks spent after broadcast)
+            List<String> spentUtxoKeys = identifySpentInputs(result.rawHex(), available);
 
             cmd.replyTo().tell(new CoordinatorReply.PluginPaymentBuilt(
-                    result.txid(), result.rawHex(), result.feeSats()));
+                    result.txid(), result.rawHex(), result.feeSats(), spentUtxoKeys));
 
         } catch (Exception e) {
             cmd.replyTo().tell(new CoordinatorReply.Failure(
@@ -299,16 +295,12 @@ public final class PaymentCoordinator {
     }
 
     /**
-     * Mark input UTXOs as spent after a successful transaction build.
-     * Parses the built transaction's inputs and matches them against the
-     * wallet's available UTXOs.
+     * Identify which wallet UTXOs were consumed as inputs in the built transaction.
+     * Returns UTXO keys ("txid:vout") for the caller to mark spent after broadcast.
      */
-    private static void markSpentInputs(
-            ActorContext<CoordinatorCommand> ctx,
-            String walletId, String rawHex,
-            List<BitcoinUtxo> availableUtxos) {
-
-        if (rawHex == null || rawHex.isBlank()) return;
+    private static List<String> identifySpentInputs(String rawHex, List<BitcoinUtxo> availableUtxos) {
+        List<String> spentKeys = new ArrayList<>();
+        if (rawHex == null || rawHex.isBlank()) return spentKeys;
 
         try {
             Transaction tx = Transaction.fromHex(rawHex);
@@ -322,13 +314,13 @@ public final class PaymentCoordinator {
                 int prevVout = (int) input.getPrevTxnOutputIndex();
                 String utxoKey = prevTxid + ":" + prevVout;
                 if (availableKeys.contains(utxoKey)) {
-                    ctx.getSelf().tell(new CoordinatorCommand.MarkUtxoSpent(
-                            walletId, utxoKey, ctx.getSystem().ignoreRef()));
+                    spentKeys.add(utxoKey);
                 }
             }
         } catch (Exception e) {
-            LOG.log(Level.WARNING, "Failed to mark spent inputs for tx", e);
+            LOG.log(Level.WARNING, "Failed to identify spent inputs", e);
         }
+        return spentKeys;
     }
 
     static String deriveStandardAddress(Script script, NetworkAddressType addrType) {
