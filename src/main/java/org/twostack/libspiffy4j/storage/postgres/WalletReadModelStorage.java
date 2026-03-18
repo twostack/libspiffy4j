@@ -308,7 +308,7 @@ public class WalletReadModelStorage {
 
     public List<BitcoinUtxo> findUtxosByStatus(DataSource ds, String walletId,
                                                 UtxoStatus status) throws SQLException {
-        String sql = "SELECT * FROM wallet_utxo WHERE wallet_id = ? AND status = ? ORDER BY created_at DESC";
+        String sql = "SELECT * FROM wallet_utxo WHERE wallet_id = ? AND status = ? ORDER BY value_sats DESC";
         try (Connection conn = ds.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, walletId);
