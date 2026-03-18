@@ -17,4 +17,11 @@ public record AddressMetadata(
         Instant createdAt,
         boolean isWatched
 ) {
+    /**
+     * Convenience constructor for HD-derived addresses.
+     */
+    public AddressMetadata(String address, int derivationIndex, boolean isChange) {
+        this(address, BitcoinScriptType.P2PKH, null, derivationIndex, isChange,
+                null, null, null, null, 0, 0L, Instant.now(), true);
+    }
 }

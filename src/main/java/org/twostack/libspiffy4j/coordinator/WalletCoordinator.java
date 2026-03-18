@@ -15,40 +15,32 @@ import org.twostack.libspiffy4j.aggregate.wallet.WalletAggregate;
 import org.twostack.libspiffy4j.aggregate.wallet.WalletCommand;
 import org.twostack.libspiffy4j.aggregate.wallet.WalletReply;
 import org.twostack.libspiffy4j.model.*;
-import org.twostack.libspiffy4j.plugin.*;
+import org.twostack.libspiffy4j.plugin.PluginRegistry;
 import org.twostack.libspiffy4j.service.CryptoService;
 import org.twostack.libspiffy4j.service.EncryptionService;
 import org.twostack.libspiffy4j.service.TransactionBuildService;
 import org.twostack.libspiffy4j.storage.postgres.SecureStorage;
 import org.twostack.libspiffy4j.storage.postgres.WalletReadModelStorage;
 
-import org.twostack.bitcoin4j.Utils;
-import org.twostack.bitcoin4j.address.LegacyAddress;
+import org.twostack.bitcoin4j.crypto.DeterministicKey;
 import org.twostack.bitcoin4j.params.NetworkAddressType;
-import org.twostack.bitcoin4j.script.Script;
-import org.twostack.bitcoin4j.script.ScriptPattern;
-import org.twostack.bitcoin4j.transaction.Transaction;
-import org.twostack.bitcoin4j.transaction.TransactionOutput;
 
 import javax.sql.DataSource;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
  * Stateless Pekko Behavior that provides a unified API for wallet, invoice,
- * and payment operations. Routes commands to sharded aggregates and serves
- * read queries directly from the CQRS read model.
+ * and payment operations. Routes commands to sharded aggregates, serves
+ * read queries from the CQRS read model, and delegates payment operations
+ * to {@link PaymentCoordinator} and signing to {@link WalletSigningActor}.
  *
  * <p>This is NOT event-sourced. Correlation state is transient — if the node
  * crashes, in-flight operations fail and the caller retries.
  */
 public final class WalletCoordinator {
 
-    private static final Duration ASK_TIMEOUT = Duration.ofSeconds(10);
     private static final Logger LOG = Logger.getLogger(WalletCoordinator.class.getName());
 
     private WalletCoordinator() {}
@@ -76,12 +68,17 @@ public final class WalletCoordinator {
                     InvoiceAggregate.create(PersistenceId.of(
                             InvoiceAggregate.ENTITY_TYPE_KEY.name(), entityCtx.getEntityId()))));
 
+            // Spawn the signing actor
+            ActorRef<WalletSigningActor.SigningCommand> signingActor = ctx.spawn(
+                    WalletSigningActor.create(secureStorage, encryptionService, cryptoService, dataSource),
+                    "wallet-signing-actor");
+
             // Correlation maps for tracking in-flight asks
             Map<String, PendingRequest> pendingCorrelations = new HashMap<>();
 
             return createBehavior(ctx, sharding, pluginRegistry, readModelStorage, dataSource,
                     cryptoService, secureStorage, encryptionService, transactionBuildService,
-                    pendingCorrelations);
+                    signingActor, pendingCorrelations);
         });
     }
 
@@ -95,11 +92,16 @@ public final class WalletCoordinator {
             SecureStorage secureStorage,
             EncryptionService encryptionService,
             TransactionBuildService transactionBuildService,
+            ActorRef<WalletSigningActor.SigningCommand> signingActor,
             Map<String, PendingRequest> pendingCorrelations) {
 
         return Behaviors.receive(CoordinatorCommand.class)
                 .onMessage(CoordinatorCommand.CreateWallet.class, cmd ->
-                        onCreateWallet(ctx, sharding, pendingCorrelations, cmd))
+                        onCreateWallet(ctx, sharding, cryptoService, secureStorage,
+                                encryptionService, dataSource, pendingCorrelations, cmd))
+                .onMessage(CoordinatorCommand.DeriveAddress.class, cmd ->
+                        onDeriveAddress(ctx, sharding, readModelStorage, dataSource,
+                                cryptoService, secureStorage, encryptionService, pendingCorrelations, cmd))
                 .onMessage(CoordinatorCommand.GetBalance.class, cmd ->
                         onGetBalance(readModelStorage, dataSource, cmd))
                 .onMessage(CoordinatorCommand.GetTransactions.class, cmd ->
@@ -110,20 +112,21 @@ public final class WalletCoordinator {
                         onCreateInvoice(ctx, sharding, pendingCorrelations, cmd))
                 .onMessage(CoordinatorCommand.MarkInvoicePaid.class, cmd ->
                         onMarkInvoicePaid(ctx, sharding, pendingCorrelations, cmd))
-                .onMessage(CoordinatorCommand.BuildPayment.class, cmd ->
-                        onBuildPayment(ctx, sharding, readModelStorage, dataSource,
-                                cryptoService, secureStorage, encryptionService,
-                                transactionBuildService, cmd))
-                .onMessage(CoordinatorCommand.BuildPluginPayment.class, cmd ->
-                        onBuildPluginPayment(ctx, sharding, pluginRegistry, readModelStorage,
-                                dataSource, cryptoService, secureStorage, encryptionService, cmd))
+                .onMessage(CoordinatorCommand.BuildPayment.class, cmd -> {
+                    PaymentCoordinator.buildPayment(ctx, readModelStorage, dataSource,
+                            transactionBuildService, signingActor, cmd);
+                    return Behaviors.same();
+                })
+                .onMessage(CoordinatorCommand.BuildPluginPayment.class, cmd -> {
+                    PaymentCoordinator.buildPluginPayment(ctx, pluginRegistry, readModelStorage,
+                            dataSource, transactionBuildService, signingActor, cmd);
+                    return Behaviors.same();
+                })
                 .onMessage(CoordinatorCommand.RecordUtxo.class, cmd ->
                         onRecordUtxo(ctx, sharding, pendingCorrelations, cmd))
                 .onMessage(CoordinatorCommand.RecordTransaction.class, cmd ->
                         onRecordTransaction(ctx, sharding, pluginRegistry, readModelStorage,
                                 dataSource, pendingCorrelations, cmd))
-                .onMessage(CoordinatorCommand.RecordAddress.class, cmd ->
-                        onRecordAddress(ctx, sharding, pendingCorrelations, cmd))
                 .onMessage(CoordinatorCommand.WrappedWalletReply.class, cmd ->
                         onWrappedWalletReply(pendingCorrelations, cmd))
                 .onMessage(CoordinatorCommand.WrappedInvoiceReply.class, cmd ->
@@ -136,19 +139,125 @@ public final class WalletCoordinator {
     private static Behavior<CoordinatorCommand> onCreateWallet(
             ActorContext<CoordinatorCommand> ctx,
             ClusterSharding sharding,
+            CryptoService cryptoService,
+            SecureStorage secureStorage,
+            EncryptionService encryptionService,
+            DataSource dataSource,
             Map<String, PendingRequest> pending,
             CoordinatorCommand.CreateWallet cmd) {
 
-        String correlationId = UUID.randomUUID().toString();
-        pending.put(correlationId, new PendingRequest(cmd.replyTo(), "CreateWallet"));
+        try {
+            DeterministicKey hdKey = resolveHDKey(cryptoService, cmd);
 
-        ActorRef<WalletReply> adapter = spawnWalletReplyBridge(ctx, correlationId);
+            NetworkAddressType addrType = toNetworkAddressType(cmd.networkType());
+            int coinType = (cmd.networkType() == NetworkType.MAINNET) ? 236 : 1;
+            DeterministicKey key0 = cryptoService.derivePrivateKey(hdKey, 0, 0, coinType, false);
+            String rootAddress = cryptoService.generateAddress(key0, cmd.networkType());
 
-        EntityRef<WalletCommand> walletRef =
-                sharding.entityRefFor(WalletAggregate.ENTITY_TYPE_KEY, cmd.walletId());
-        walletRef.tell(new WalletCommand.CreateWalletCommand(
-                cmd.walletId(), cmd.name(), cmd.walletType(), cmd.networkType(),
-                cmd.rootAddress(), cmd.metadata(), adapter));
+            if (encryptionService != null) {
+                org.twostack.bitcoin4j.params.NetworkType bitcoin4jNetwork = toBitcoin4jNetworkType(cmd.networkType());
+                byte[] hdKeyBytes = hdKey.serializePrivate(bitcoin4jNetwork);
+                String context = "wallet:" + cmd.walletId() + ":hdkey";
+                EncryptionResult encrypted = encryptionService.encrypt(hdKeyBytes, context);
+
+                try (var conn = dataSource.getConnection()) {
+                    boolean wasAutoCommit = conn.getAutoCommit();
+                    if (wasAutoCommit) conn.setAutoCommit(false);
+                    secureStorage.storeEncryptedKey(conn, cmd.walletId(), "hdkey",
+                            encrypted.ciphertext(), encrypted.nonce(), 1);
+                    conn.commit();
+                    if (wasAutoCommit) conn.setAutoCommit(true);
+                }
+            } else {
+                LOG.warning("No EncryptionService — wallet key will not be stored for " + cmd.walletId());
+            }
+
+            String correlationId = UUID.randomUUID().toString();
+            pending.put(correlationId, new PendingRequest(cmd.replyTo(), "CreateWallet"));
+
+            ActorRef<WalletReply> adapter = spawnWalletReplyBridge(ctx, correlationId);
+
+            EntityRef<WalletCommand> walletRef =
+                    sharding.entityRefFor(WalletAggregate.ENTITY_TYPE_KEY, cmd.walletId());
+            walletRef.tell(new WalletCommand.CreateWalletCommand(
+                    cmd.walletId(), cmd.name(), cmd.walletType(), cmd.networkType(),
+                    rootAddress, cmd.metadata(), adapter));
+
+            String rootCorrelationId = UUID.randomUUID().toString();
+            pending.put(rootCorrelationId, new PendingRequest(ctx.getSystem().ignoreRef(), "RecordAddress"));
+            ActorRef<WalletReply> rootAddrAdapter = spawnWalletReplyBridge(ctx, rootCorrelationId);
+            walletRef.tell(new WalletCommand.RecordAddressCommand(
+                    cmd.walletId(), new AddressMetadata(rootAddress, 0, false), rootAddrAdapter));
+
+        } catch (Exception e) {
+            cmd.replyTo().tell(new CoordinatorReply.Failure("Wallet creation failed: " + e.getMessage()));
+        }
+
+        return Behaviors.same();
+    }
+
+    private static DeterministicKey resolveHDKey(CryptoService cryptoService,
+                                                   CoordinatorCommand.CreateWallet cmd) {
+        org.twostack.bitcoin4j.params.NetworkType bitcoin4jNetwork = toBitcoin4jNetworkType(cmd.networkType());
+
+        if (cmd.mnemonic() != null && !cmd.mnemonic().isBlank()) {
+            List<String> words = List.of(cmd.mnemonic().split("\\s+"));
+            return cryptoService.mnemonicToHDPrivateKey(words, "");
+        }
+        if (cmd.xpriv() != null && !cmd.xpriv().isBlank()) {
+            return DeterministicKey.deserializeB58(cmd.xpriv(), bitcoin4jNetwork);
+        }
+        if (cmd.wif() != null && !cmd.wif().isBlank()) {
+            throw new IllegalArgumentException(
+                    "WIF keys are single-purpose and do not support address derivation. Use mnemonic or xpriv.");
+        }
+        List<String> mnemonic = cryptoService.generateMnemonic();
+        LOG.info("No key material provided for wallet " + cmd.walletId()
+                + " — generated mnemonic: " + String.join(" ", mnemonic));
+        return cryptoService.mnemonicToHDPrivateKey(mnemonic, "");
+    }
+
+    private static Behavior<CoordinatorCommand> onDeriveAddress(
+            ActorContext<CoordinatorCommand> ctx,
+            ClusterSharding sharding,
+            WalletReadModelStorage readModelStorage,
+            DataSource dataSource,
+            CryptoService cryptoService,
+            SecureStorage secureStorage,
+            EncryptionService encryptionService,
+            Map<String, PendingRequest> pending,
+            CoordinatorCommand.DeriveAddress cmd) {
+
+        try {
+            Optional<WalletSummary> summary = readModelStorage.findWalletSummary(dataSource, cmd.walletId());
+            if (summary.isEmpty()) {
+                cmd.replyTo().tell(new CoordinatorReply.Failure("Wallet not found: " + cmd.walletId()));
+                return Behaviors.same();
+            }
+            int nextIndex = summary.get().addressCount();
+            NetworkType networkType = summary.get().networkType();
+            int coinType = (networkType == NetworkType.MAINNET) ? 236 : 1;
+
+            org.twostack.bitcoin4j.params.NetworkType bitcoin4jNetwork = toBitcoin4jNetworkType(networkType);
+            DeterministicKey hdKey = retrieveHDKey(secureStorage, encryptionService, dataSource,
+                    cmd.walletId(), bitcoin4jNetwork);
+
+            DeterministicKey childKey = cryptoService.derivePrivateKey(hdKey, 0, nextIndex, coinType, false);
+            String address = cryptoService.generateAddress(childKey, networkType);
+
+            String correlationId = UUID.randomUUID().toString();
+            pending.put(correlationId, new PendingRequest(ctx.getSystem().ignoreRef(), "RecordAddress"));
+            ActorRef<WalletReply> adapter = spawnWalletReplyBridge(ctx, correlationId);
+
+            EntityRef<WalletCommand> walletRef =
+                    sharding.entityRefFor(WalletAggregate.ENTITY_TYPE_KEY, cmd.walletId());
+            walletRef.tell(new WalletCommand.RecordAddressCommand(
+                    cmd.walletId(), new AddressMetadata(address, nextIndex, false), adapter));
+
+            cmd.replyTo().tell(new CoordinatorReply.AddressDerived(address, nextIndex));
+        } catch (Exception e) {
+            cmd.replyTo().tell(new CoordinatorReply.Failure("Address derivation failed: " + e.getMessage()));
+        }
 
         return Behaviors.same();
     }
@@ -238,140 +347,6 @@ public final class WalletCoordinator {
         return Behaviors.same();
     }
 
-    // ── Payment commands ──
-
-    private static Behavior<CoordinatorCommand> onBuildPayment(
-            ActorContext<CoordinatorCommand> ctx,
-            ClusterSharding sharding,
-            WalletReadModelStorage readModelStorage,
-            DataSource dataSource,
-            CryptoService cryptoService,
-            SecureStorage secureStorage,
-            EncryptionService encryptionService,
-            TransactionBuildService transactionBuildService,
-            CoordinatorCommand.BuildPayment cmd) {
-        try {
-            // 1. Read available UTXOs from read model
-            List<BitcoinUtxo> available = readModelStorage.findUtxosByStatus(
-                    dataSource, cmd.walletId(), UtxoStatus.AVAILABLE);
-
-            if (available.isEmpty()) {
-                cmd.replyTo().tell(new CoordinatorReply.Failure("No available UTXOs"));
-                return Behaviors.same();
-            }
-
-            // 2. Retrieve and decrypt signing key
-            org.twostack.bitcoin4j.ECKey signingKey = retrieveSigningKey(
-                    secureStorage, encryptionService, cryptoService, dataSource, cmd.walletId());
-
-            // 3. Determine network type from wallet
-            Optional<WalletSummary> summary = readModelStorage.findWalletSummary(dataSource, cmd.walletId());
-            if (summary.isEmpty()) {
-                cmd.replyTo().tell(new CoordinatorReply.Failure("Wallet not found: " + cmd.walletId()));
-                return Behaviors.same();
-            }
-            NetworkType networkType = summary.get().networkType();
-
-            // 4. Build transaction
-            TransactionBuildResult result = transactionBuildService.buildTransaction(
-                    available, cmd.outputs(), cmd.config(), cmd.changeAddress(),
-                    signingKey, networkType);
-
-            cmd.replyTo().tell(new CoordinatorReply.PaymentBuilt(result));
-        } catch (Exception e) {
-            cmd.replyTo().tell(new CoordinatorReply.Failure("Payment build failed: " + e.getMessage()));
-        }
-        return Behaviors.same();
-    }
-
-    private static Behavior<CoordinatorCommand> onBuildPluginPayment(
-            ActorContext<CoordinatorCommand> ctx,
-            ClusterSharding sharding,
-            PluginRegistry pluginRegistry,
-            WalletReadModelStorage readModelStorage,
-            DataSource dataSource,
-            CryptoService cryptoService,
-            SecureStorage secureStorage,
-            EncryptionService encryptionService,
-            CoordinatorCommand.BuildPluginPayment cmd) {
-        try {
-            // 1. Look up the plugin
-            Optional<TransactionBuilderPlugin> pluginOpt =
-                    pluginRegistry.getTransactionBuilderPlugin(cmd.pluginId());
-            if (pluginOpt.isEmpty()) {
-                cmd.replyTo().tell(new CoordinatorReply.Failure("Plugin not found: " + cmd.pluginId()));
-                return Behaviors.same();
-            }
-            TransactionBuilderPlugin plugin = pluginOpt.get();
-
-            // 2. Verify action is supported
-            if (!plugin.supportedActions().contains(cmd.action())) {
-                cmd.replyTo().tell(new CoordinatorReply.Failure(
-                        "Unsupported action '%s' for plugin '%s'".formatted(cmd.action(), cmd.pluginId())));
-                return Behaviors.same();
-            }
-
-            // 3. Read available UTXOs
-            List<BitcoinUtxo> available = readModelStorage.findUtxosByStatus(
-                    dataSource, cmd.walletId(), UtxoStatus.AVAILABLE);
-            if (available.isEmpty()) {
-                cmd.replyTo().tell(new CoordinatorReply.Failure("No available UTXOs"));
-                return Behaviors.same();
-            }
-
-            // 4. Retrieve and decrypt signing key
-            org.twostack.bitcoin4j.ECKey signingKey = retrieveSigningKey(
-                    secureStorage, encryptionService, cryptoService, dataSource, cmd.walletId());
-
-            // 5. Create CallbackTransactionSigner (key stays in closure)
-            CallbackTransactionSigner signer = (sighash, inputIndex) -> {
-                org.twostack.bitcoin4j.ECKey.ECDSASignature sig =
-                        signingKey.sign(org.twostack.bitcoin4j.Sha256Hash.wrap(sighash));
-                return sig.encodeToDER();
-            };
-
-            // 6. Build public key list
-            List<String> publicKeyHexes = List.of(
-                    org.twostack.bitcoin4j.Utils.HEX.encode(signingKey.getPubKey()));
-
-            // 7. Create TransactionLookup (resolves raw hex from wallet's read model)
-            TransactionLookup transactionLookup = txid -> {
-                try {
-                    return readModelStorage.findRawHexByTxid(dataSource, txid).orElse(null);
-                } catch (Exception e) {
-                    LOG.log(Level.WARNING, "Failed to look up transaction: " + txid, e);
-                    return null;
-                }
-            };
-
-            // 8. Build PluginTransactionRequest
-            PluginTransactionRequest request = new PluginTransactionRequest(
-                    available, signer, transactionLookup, publicKeyHexes, cmd.changeAddress(), cmd.pluginParams());
-
-            // 8. Plugin builds the complete transaction
-            TransactionBuilderResult result = plugin.buildTransaction(request);
-
-            // 9. Validate transaction structure
-            byte[] rawTx = org.twostack.bitcoin4j.Utils.HEX.decode(result.rawHex());
-            if (!plugin.validateTransactionStructure(rawTx, cmd.action())) {
-                cmd.replyTo().tell(new CoordinatorReply.Failure(
-                        "Plugin transaction failed structure validation"));
-                return Behaviors.same();
-            }
-
-            // 10. Auto-record wallet-owned output UTXOs from the built transaction
-            autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
-                    cmd.walletId(), result.txid(), result.rawHex());
-
-            cmd.replyTo().tell(new CoordinatorReply.PluginPaymentBuilt(
-                    result.txid(), result.rawHex(), result.feeSats()));
-        } catch (Exception e) {
-            cmd.replyTo().tell(new CoordinatorReply.Failure(
-                    "Plugin payment failed: " + e.getMessage()));
-        }
-        return Behaviors.same();
-    }
-
     // ── UTXO/Transaction recording ──
 
     private static Behavior<CoordinatorCommand> onRecordUtxo(
@@ -411,28 +386,9 @@ public final class WalletCoordinator {
         walletRef.tell(new WalletCommand.RecordTransactionCommand(
                 cmd.walletId(), cmd.transaction(), adapter));
 
-        // Auto-record wallet-owned output UTXOs from the raw transaction
-        autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
-                cmd.walletId(), cmd.transaction().txid(), cmd.transaction().rawHex());
-
-        return Behaviors.same();
-    }
-
-    private static Behavior<CoordinatorCommand> onRecordAddress(
-            ActorContext<CoordinatorCommand> ctx,
-            ClusterSharding sharding,
-            Map<String, PendingRequest> pending,
-            CoordinatorCommand.RecordAddress cmd) {
-
-        String correlationId = UUID.randomUUID().toString();
-        pending.put(correlationId, new PendingRequest(cmd.replyTo(), cmd.getClass().getSimpleName()));
-
-        ActorRef<WalletReply> adapter = spawnWalletReplyBridge(ctx, correlationId);
-
-        EntityRef<WalletCommand> walletRef =
-                sharding.entityRefFor(WalletAggregate.ENTITY_TYPE_KEY, cmd.walletId());
-        walletRef.tell(new WalletCommand.RecordAddressCommand(
-                cmd.walletId(), cmd.addressMetadata(), adapter));
+        // Auto-record wallet-owned output UTXOs
+        PaymentCoordinator.autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
+                cmd.walletId(), cmd.transaction().txid(), cmd.transaction().rawHex(), null);
 
         return Behaviors.same();
     }
@@ -487,12 +443,6 @@ public final class WalletCoordinator {
 
     // ── Reply bridge helpers ──
 
-    /**
-     * Spawn a short-lived anonymous actor that receives a WalletReply from an
-     * aggregate and forwards it as a WrappedWalletReply to the coordinator.
-     * Each spawn gets its own correlationId, avoiding the messageAdapter singleton
-     * problem where a second call replaces the first's lambda.
-     */
     private static ActorRef<WalletReply> spawnWalletReplyBridge(
             ActorContext<CoordinatorCommand> ctx, String correlationId) {
         return ctx.spawnAnonymous(Behaviors.receiveMessage(reply -> {
@@ -501,9 +451,6 @@ public final class WalletCoordinator {
         }));
     }
 
-    /**
-     * Same as above but for InvoiceReply.
-     */
     private static ActorRef<InvoiceReply> spawnInvoiceReplyBridge(
             ActorContext<CoordinatorCommand> ctx, String correlationId) {
         return ctx.spawnAnonymous(Behaviors.receiveMessage(reply -> {
@@ -512,109 +459,28 @@ public final class WalletCoordinator {
         }));
     }
 
-    // ── Private helpers ──
+    // ── Key helpers (used by CreateWallet and DeriveAddress only) ──
 
-    /**
-     * Parse a raw transaction and auto-record any outputs owned by this wallet.
-     * Ownership is determined by:
-     * <ol>
-     *   <li>Standard scripts (P2PKH): derive address, match against wallet addresses</li>
-     *   <li>Plugin scripts: call identifyScript/extractMetadata, match ownerAddress
-     *       from metadata against wallet addresses</li>
-     * </ol>
-     * Each matched output becomes a RecordUtxo self-tell, which flows through
-     * the normal aggregate → event → projection pipeline (where plugin enrichment happens).
-     */
-    private static void autoRecordOutputUtxos(
-            ActorContext<CoordinatorCommand> ctx,
-            PluginRegistry pluginRegistry,
-            WalletReadModelStorage readModelStorage,
+    private static DeterministicKey retrieveHDKey(
+            SecureStorage secureStorage,
+            EncryptionService encryptionService,
             DataSource dataSource,
-            String walletId, String txid, String rawHex) {
+            String walletId,
+            org.twostack.bitcoin4j.params.NetworkType bitcoin4jNetwork) throws Exception {
 
-        if (rawHex == null || rawHex.isBlank()) return;
-
-        try {
-            Transaction tx = Transaction.fromHex(rawHex);
-            List<TransactionOutput> outputs = tx.getOutputs();
-
-            // Look up wallet's network type for address derivation
-            Optional<WalletSummary> summaryOpt = readModelStorage.findWalletSummary(dataSource, walletId);
-            if (summaryOpt.isEmpty()) return;
-            NetworkAddressType addrType = toNetworkAddressType(summaryOpt.get().networkType());
-
-            // Collect wallet addresses for matching
-            Set<String> walletAddresses = new HashSet<>(
-                    readModelStorage.findAddressesByWalletId(dataSource, walletId));
-
-            for (int vout = 0; vout < outputs.size(); vout++) {
-                TransactionOutput output = outputs.get(vout);
-                Script script = output.getScript();
-                byte[] scriptBytes = script.getProgram();
-                String scriptHex = Utils.HEX.encode(scriptBytes);
-
-                // Try standard address derivation first
-                String address = deriveStandardAddress(script, addrType);
-
-                if (address != null && walletAddresses.contains(address)) {
-                    recordUtxo(ctx, walletId, txid, vout, output, scriptHex, address);
-                    continue;
-                }
-
-                // Fall back to plugin identification for non-standard scripts
-                if (pluginRegistry.hasPlugins()) {
-                    Optional<PluginRegistry.PluginIdentification> identification =
-                            pluginRegistry.identifyScript(scriptBytes);
-                    if (identification.isPresent()) {
-                        ScriptPlugin plugin = pluginRegistry.getPlugin(
-                                identification.get().pluginId()).orElse(null);
-                        if (plugin != null) {
-                            Map<String, Object> metadata = plugin.extractMetadata(scriptBytes);
-                            String ownerAddress = metadata != null
-                                    ? (String) metadata.get("ownerAddress") : null;
-                            if (ownerAddress != null && walletAddresses.contains(ownerAddress)) {
-                                recordUtxo(ctx, walletId, txid, vout, output, scriptHex, ownerAddress);
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (Exception e) {
-            LOG.log(Level.WARNING, "Failed to auto-record output UTXOs for tx " + txid, e);
+        if (encryptionService == null) {
+            throw new IllegalStateException("EncryptionService required for key operations");
         }
-    }
 
-    private static void recordUtxo(
-            ActorContext<CoordinatorCommand> ctx,
-            String walletId, String txid, int vout,
-            TransactionOutput output, String scriptHex, String address) {
-
-        Instant now = Instant.now();
-        BitcoinUtxo utxo = new BitcoinUtxo(
-                txid, vout, output.getAmount().longValue(), scriptHex,
-                address, UtxoStatus.AVAILABLE,
-                null, null, now, now,
-                null, null, null, null, null,
-                null, null  // pluginId/metadata enriched by projection
-        );
-        ctx.getSelf().tell(new CoordinatorCommand.RecordUtxo(
-                walletId, utxo, ctx.getSystem().ignoreRef()));
-    }
-
-    /**
-     * Derive address from a standard script type (P2PKH).
-     * Returns null for non-standard scripts.
-     */
-    private static String deriveStandardAddress(Script script, NetworkAddressType addrType) {
-        try {
-            if (ScriptPattern.isP2PKH(script)) {
-                byte[] hash160 = ScriptPattern.extractHashFromP2PKH(script);
-                return LegacyAddress.fromPubKeyHash(addrType, hash160).toBase58();
-            }
-        } catch (Exception e) {
-            // Non-standard script — not an error
+        Optional<EncryptedKeyRecord> keyRecord =
+                secureStorage.loadEncryptedKey(dataSource, walletId, "hdkey");
+        if (keyRecord.isEmpty()) {
+            throw new IllegalStateException("No HD key found for wallet: " + walletId);
         }
-        return null;
+
+        String context = "wallet:" + walletId + ":hdkey";
+        byte[] decrypted = encryptionService.decrypt(keyRecord.get().encryptedKey(), keyRecord.get().nonce(), context);
+        return DeterministicKey.deserialize(bitcoin4jNetwork, decrypted);
     }
 
     private static NetworkAddressType toNetworkAddressType(NetworkType networkType) {
@@ -624,28 +490,11 @@ public final class WalletCoordinator {
         };
     }
 
-    private static org.twostack.bitcoin4j.ECKey retrieveSigningKey(
-            SecureStorage secureStorage,
-            EncryptionService encryptionService,
-            CryptoService cryptoService,
-            DataSource dataSource,
-            String walletId) throws Exception {
-
-        if (encryptionService == null) {
-            throw new IllegalStateException("EncryptionService required for payment operations");
-        }
-
-        Optional<EncryptedKeyRecord> keyRecord =
-                secureStorage.loadEncryptedKey(dataSource, walletId, "wif");
-        if (keyRecord.isEmpty()) {
-            throw new IllegalStateException("No signing key found for wallet: " + walletId);
-        }
-
-        EncryptedKeyRecord record = keyRecord.get();
-        byte[] decrypted = encryptionService.decrypt(
-                record.encryptedKey(), record.nonce(), "wallet:" + walletId);
-        String wif = new String(decrypted, java.nio.charset.StandardCharsets.UTF_8);
-
-        return cryptoService.privateKeyFromWIF(wif);
+    private static org.twostack.bitcoin4j.params.NetworkType toBitcoin4jNetworkType(NetworkType networkType) {
+        return switch (networkType) {
+            case MAINNET -> org.twostack.bitcoin4j.params.NetworkType.MAIN;
+            case TESTNET -> org.twostack.bitcoin4j.params.NetworkType.TEST;
+            case REGTEST -> org.twostack.bitcoin4j.params.NetworkType.REGTEST;
+        };
     }
 }

@@ -341,6 +341,24 @@ public class WalletReadModelStorage {
         }
     }
 
+    public Map<String, Integer> findAddressIndexMap(DataSource ds, String walletId) throws SQLException {
+        String sql = "SELECT address, derivation_index FROM wallet_address WHERE wallet_id = ?";
+        try (Connection conn = ds.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, walletId);
+            try (ResultSet rs = ps.executeQuery()) {
+                Map<String, Integer> result = new HashMap<>();
+                while (rs.next()) {
+                    int index = rs.getInt("derivation_index");
+                    if (!rs.wasNull()) {
+                        result.put(rs.getString("address"), index);
+                    }
+                }
+                return result;
+            }
+        }
+    }
+
     public List<String> findAddressesByWalletId(DataSource ds, String walletId) throws SQLException {
         String sql = "SELECT address FROM wallet_address WHERE wallet_id = ? ORDER BY recorded_at";
         try (Connection conn = ds.getConnection();

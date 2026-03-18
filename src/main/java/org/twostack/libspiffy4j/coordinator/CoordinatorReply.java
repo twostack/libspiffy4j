@@ -9,6 +9,7 @@ import java.util.List;
  */
 public sealed interface CoordinatorReply permits
         CoordinatorReply.WalletCreated,
+        CoordinatorReply.AddressDerived,
         CoordinatorReply.BalanceResult,
         CoordinatorReply.TransactionsResult,
         CoordinatorReply.UtxosResult,
@@ -20,6 +21,8 @@ public sealed interface CoordinatorReply permits
         CoordinatorReply.Failure {
 
     record WalletCreated(String walletId) implements CoordinatorReply {}
+
+    record AddressDerived(String address, int index) implements CoordinatorReply {}
 
     record BalanceResult(WalletBalance balance) implements CoordinatorReply {}
 

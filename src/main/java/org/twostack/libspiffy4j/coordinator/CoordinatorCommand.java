@@ -15,6 +15,7 @@ import java.util.Map;
  */
 public sealed interface CoordinatorCommand permits
         CoordinatorCommand.CreateWallet,
+        CoordinatorCommand.DeriveAddress,
         CoordinatorCommand.GetBalance,
         CoordinatorCommand.GetTransactions,
         CoordinatorCommand.GetUtxos,
@@ -24,16 +25,31 @@ public sealed interface CoordinatorCommand permits
         CoordinatorCommand.BuildPluginPayment,
         CoordinatorCommand.RecordUtxo,
         CoordinatorCommand.RecordTransaction,
-        CoordinatorCommand.RecordAddress,
         CoordinatorCommand.WrappedWalletReply,
         CoordinatorCommand.WrappedInvoiceReply {
 
     // ── Wallet commands ──
 
+    /**
+     * Create a wallet with optional key material. Exactly one of {@code mnemonic},
+     * {@code xpriv}, or {@code wif} should be provided. The coordinator encrypts
+     * and stores the key in SecureStorage, derives the root address, and records it.
+     */
     record CreateWallet(
             String walletId, String name, WalletType walletType,
-            NetworkType networkType, String rootAddress,
+            NetworkType networkType,
+            String mnemonic, String xpriv, String wif,
             Map<String, Object> metadata,
+            ActorRef<CoordinatorReply> replyTo
+    ) implements CoordinatorCommand {}
+
+    /**
+     * Derive the next unused address for a wallet. The coordinator loads the
+     * HD key from SecureStorage, derives the next child key, records the
+     * address internally, and returns it.
+     */
+    record DeriveAddress(
+            String walletId,
             ActorRef<CoordinatorReply> replyTo
     ) implements CoordinatorCommand {}
 
@@ -98,11 +114,6 @@ public sealed interface CoordinatorCommand permits
 
     record RecordTransaction(
             String walletId, BitcoinTransaction transaction,
-            ActorRef<CoordinatorReply> replyTo
-    ) implements CoordinatorCommand {}
-
-    record RecordAddress(
-            String walletId, AddressMetadata addressMetadata,
             ActorRef<CoordinatorReply> replyTo
     ) implements CoordinatorCommand {}
 
