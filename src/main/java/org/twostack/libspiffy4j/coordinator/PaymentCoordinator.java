@@ -105,6 +105,8 @@ public final class PaymentCoordinator {
             }
 
             WalletSigningActor.SignerReady ready = (WalletSigningActor.SignerReady) signingReply;
+            LOG.info("Signer ready for wallet " + cmd.walletId()
+                    + " — pubKeys=" + ready.publicKeyHexes());
 
             // 7. Create TransactionLookup
             TransactionLookup transactionLookup = txid -> {
@@ -122,7 +124,9 @@ public final class PaymentCoordinator {
                     ready.publicKeyHexes(), cmd.changeAddress(), cmd.pluginParams());
 
             // 9. Plugin builds the complete transaction
+            LOG.info("Invoking plugin " + cmd.pluginId() + " action=" + cmd.action());
             TransactionBuilderResult result = plugin.buildTransaction(request);
+            LOG.info("Plugin returned txid=" + result.txid() + " rawHex length=" + result.rawHex().length());
 
             // 10. Validate transaction structure
             byte[] rawTx = Utils.HEX.decode(result.rawHex());
@@ -135,6 +139,9 @@ public final class PaymentCoordinator {
             // 11. Auto-record wallet-owned output UTXOs
             autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
                     cmd.walletId(), result.txid(), result.rawHex(), addressToIndex);
+
+            // 12. Mark consumed input UTXOs as spent
+            markSpentInputs(ctx, cmd.walletId(), result.rawHex(), available);
 
             cmd.replyTo().tell(new CoordinatorReply.PluginPaymentBuilt(
                     result.txid(), result.rawHex(), result.feeSats()));
@@ -289,6 +296,39 @@ public final class PaymentCoordinator {
         );
         ctx.getSelf().tell(new CoordinatorCommand.RecordUtxo(
                 walletId, utxo, ctx.getSystem().ignoreRef()));
+    }
+
+    /**
+     * Mark input UTXOs as spent after a successful transaction build.
+     * Parses the built transaction's inputs and matches them against the
+     * wallet's available UTXOs.
+     */
+    private static void markSpentInputs(
+            ActorContext<CoordinatorCommand> ctx,
+            String walletId, String rawHex,
+            List<BitcoinUtxo> availableUtxos) {
+
+        if (rawHex == null || rawHex.isBlank()) return;
+
+        try {
+            Transaction tx = Transaction.fromHex(rawHex);
+            Set<String> availableKeys = new HashSet<>();
+            for (BitcoinUtxo utxo : availableUtxos) {
+                availableKeys.add(utxo.key());
+            }
+
+            for (var input : tx.getInputs()) {
+                String prevTxid = Utils.HEX.encode(input.getPrevTxnId());
+                int prevVout = (int) input.getPrevTxnOutputIndex();
+                String utxoKey = prevTxid + ":" + prevVout;
+                if (availableKeys.contains(utxoKey)) {
+                    ctx.getSelf().tell(new CoordinatorCommand.MarkUtxoSpent(
+                            walletId, utxoKey, ctx.getSystem().ignoreRef()));
+                }
+            }
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Failed to mark spent inputs for tx", e);
+        }
     }
 
     static String deriveStandardAddress(Script script, NetworkAddressType addrType) {

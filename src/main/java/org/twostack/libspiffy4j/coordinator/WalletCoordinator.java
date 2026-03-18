@@ -124,6 +124,8 @@ public final class WalletCoordinator {
                 })
                 .onMessage(CoordinatorCommand.RecordUtxo.class, cmd ->
                         onRecordUtxo(ctx, sharding, pendingCorrelations, cmd))
+                .onMessage(CoordinatorCommand.MarkUtxoSpent.class, cmd ->
+                        onMarkUtxoSpent(ctx, sharding, pendingCorrelations, cmd))
                 .onMessage(CoordinatorCommand.RecordTransaction.class, cmd ->
                         onRecordTransaction(ctx, sharding, pluginRegistry, readModelStorage,
                                 dataSource, pendingCorrelations, cmd))
@@ -363,6 +365,24 @@ public final class WalletCoordinator {
         EntityRef<WalletCommand> walletRef =
                 sharding.entityRefFor(WalletAggregate.ENTITY_TYPE_KEY, cmd.walletId());
         walletRef.tell(new WalletCommand.RecordUtxoCommand(cmd.walletId(), cmd.utxo(), adapter));
+
+        return Behaviors.same();
+    }
+
+    private static Behavior<CoordinatorCommand> onMarkUtxoSpent(
+            ActorContext<CoordinatorCommand> ctx,
+            ClusterSharding sharding,
+            Map<String, PendingRequest> pending,
+            CoordinatorCommand.MarkUtxoSpent cmd) {
+
+        String correlationId = UUID.randomUUID().toString();
+        pending.put(correlationId, new PendingRequest(cmd.replyTo(), cmd.getClass().getSimpleName()));
+
+        ActorRef<WalletReply> adapter = spawnWalletReplyBridge(ctx, correlationId);
+
+        EntityRef<WalletCommand> walletRef =
+                sharding.entityRefFor(WalletAggregate.ENTITY_TYPE_KEY, cmd.walletId());
+        walletRef.tell(new WalletCommand.MarkUtxoSpentCommand(cmd.walletId(), cmd.utxoKey(), adapter));
 
         return Behaviors.same();
     }
