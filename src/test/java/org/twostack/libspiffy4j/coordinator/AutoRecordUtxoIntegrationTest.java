@@ -230,6 +230,49 @@ class AutoRecordUtxoIntegrationTest {
         });
     }
 
+    @Test
+    void askPattern_createWallet_thenRecordAddress_works() throws Exception {
+        String walletId = "ask-pattern-test-1";
+        ActorRef<CoordinatorCommand> coordinator = lib.coordinator();
+
+        // Use AskPattern (same as Monocelo's WalletProvisioningService)
+        CoordinatorReply createReply = org.apache.pekko.actor.typed.javadsl.AskPattern
+                .<CoordinatorCommand, CoordinatorReply>ask(
+                        coordinator,
+                        replyTo -> new CoordinatorCommand.CreateWallet(
+                                walletId, "AskPattern Test", WalletType.HD, NetworkType.TESTNET,
+                                TEST_ADDRESS, Map.of(), replyTo),
+                        TIMEOUT, lib.system().scheduler()
+                ).toCompletableFuture().get(TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
+
+        assertThat(createReply).isInstanceOf(CoordinatorReply.WalletCreated.class);
+
+        // Immediately follow with RecordAddress via AskPattern
+        AddressMetadata addr = new AddressMetadata(TEST_ADDRESS, BitcoinScriptType.P2PKH,
+                null, null, false, "root", "merchant-root", null, null, 0, 0, Instant.now(), true);
+        try {
+            CoordinatorReply addrReply = org.apache.pekko.actor.typed.javadsl.AskPattern
+                    .<CoordinatorCommand, CoordinatorReply>ask(
+                            coordinator,
+                            replyTo -> new CoordinatorCommand.RecordAddress(walletId, addr, replyTo),
+                            TIMEOUT, lib.system().scheduler()
+                    ).toCompletableFuture().get(TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
+            assertThat(addrReply)
+                    .describedAs("RecordAddress reply was: %s", addrReply)
+                    .isInstanceOf(CoordinatorReply.CommandAccepted.class);
+        } catch (java.util.concurrent.TimeoutException te) {
+            throw new AssertionError("RecordAddress timed out after " + TIMEOUT + " — AskPattern reply never received", te);
+        } catch (java.util.concurrent.ExecutionException ee) {
+            throw new AssertionError("RecordAddress ExecutionException: " + ee.getCause(), ee);
+        }
+
+        // Verify address projected
+        await().atMost(PROJECTION_TIMEOUT).untilAsserted(() -> {
+            List<String> addresses = storage.findAddressesByWalletId(dataSource, walletId);
+            assertThat(addresses).contains(TEST_ADDRESS);
+        });
+    }
+
     private static void runMigrations(PGSimpleDataSource ds) throws Exception {
         String[] scripts = {
                 "db/libspiffy4j/V001__create_journal.sql",

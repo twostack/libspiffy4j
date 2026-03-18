@@ -53,6 +53,9 @@ public final class WalletCoordinator {
 
     private WalletCoordinator() {}
 
+    /** Tracks a pending request with its reply target and originating command type. */
+    private record PendingRequest(ActorRef<CoordinatorReply> replyTo, String commandType) {}
+
     public static Behavior<CoordinatorCommand> create(
             ClusterSharding sharding,
             PluginRegistry pluginRegistry,
@@ -73,17 +76,8 @@ public final class WalletCoordinator {
                     InvoiceAggregate.create(PersistenceId.of(
                             InvoiceAggregate.ENTITY_TYPE_KEY.name(), entityCtx.getEntityId()))));
 
-            // Create message adapters for aggregate replies
-            ActorRef<WalletReply> walletReplyAdapter = ctx.messageAdapter(
-                    WalletReply.class,
-                    reply -> new CoordinatorCommand.WrappedWalletReply("", reply));
-
-            ActorRef<InvoiceReply> invoiceReplyAdapter = ctx.messageAdapter(
-                    InvoiceReply.class,
-                    reply -> new CoordinatorCommand.WrappedInvoiceReply("", reply));
-
             // Correlation maps for tracking in-flight asks
-            Map<String, ActorRef<CoordinatorReply>> pendingCorrelations = new HashMap<>();
+            Map<String, PendingRequest> pendingCorrelations = new HashMap<>();
 
             return createBehavior(ctx, sharding, pluginRegistry, readModelStorage, dataSource,
                     cryptoService, secureStorage, encryptionService, transactionBuildService,
@@ -101,7 +95,7 @@ public final class WalletCoordinator {
             SecureStorage secureStorage,
             EncryptionService encryptionService,
             TransactionBuildService transactionBuildService,
-            Map<String, ActorRef<CoordinatorReply>> pendingCorrelations) {
+            Map<String, PendingRequest> pendingCorrelations) {
 
         return Behaviors.receive(CoordinatorCommand.class)
                 .onMessage(CoordinatorCommand.CreateWallet.class, cmd ->
@@ -142,14 +136,13 @@ public final class WalletCoordinator {
     private static Behavior<CoordinatorCommand> onCreateWallet(
             ActorContext<CoordinatorCommand> ctx,
             ClusterSharding sharding,
-            Map<String, ActorRef<CoordinatorReply>> pending,
+            Map<String, PendingRequest> pending,
             CoordinatorCommand.CreateWallet cmd) {
 
         String correlationId = UUID.randomUUID().toString();
-        pending.put(correlationId, cmd.replyTo());
+        pending.put(correlationId, new PendingRequest(cmd.replyTo(), "CreateWallet"));
 
-        ActorRef<WalletReply> adapter = ctx.messageAdapter(WalletReply.class,
-                reply -> new CoordinatorCommand.WrappedWalletReply(correlationId, reply));
+        ActorRef<WalletReply> adapter = spawnWalletReplyBridge(ctx, correlationId);
 
         EntityRef<WalletCommand> walletRef =
                 sharding.entityRefFor(WalletAggregate.ENTITY_TYPE_KEY, cmd.walletId());
@@ -208,14 +201,13 @@ public final class WalletCoordinator {
     private static Behavior<CoordinatorCommand> onCreateInvoice(
             ActorContext<CoordinatorCommand> ctx,
             ClusterSharding sharding,
-            Map<String, ActorRef<CoordinatorReply>> pending,
+            Map<String, PendingRequest> pending,
             CoordinatorCommand.CreateInvoice cmd) {
 
         String correlationId = UUID.randomUUID().toString();
-        pending.put(correlationId, cmd.replyTo());
+        pending.put(correlationId, new PendingRequest(cmd.replyTo(), cmd.getClass().getSimpleName()));
 
-        ActorRef<InvoiceReply> adapter = ctx.messageAdapter(InvoiceReply.class,
-                reply -> new CoordinatorCommand.WrappedInvoiceReply(correlationId, reply));
+        ActorRef<InvoiceReply> adapter = spawnInvoiceReplyBridge(ctx, correlationId);
 
         EntityRef<InvoiceCommand> invoiceRef =
                 sharding.entityRefFor(InvoiceAggregate.ENTITY_TYPE_KEY, cmd.invoiceId());
@@ -229,14 +221,13 @@ public final class WalletCoordinator {
     private static Behavior<CoordinatorCommand> onMarkInvoicePaid(
             ActorContext<CoordinatorCommand> ctx,
             ClusterSharding sharding,
-            Map<String, ActorRef<CoordinatorReply>> pending,
+            Map<String, PendingRequest> pending,
             CoordinatorCommand.MarkInvoicePaid cmd) {
 
         String correlationId = UUID.randomUUID().toString();
-        pending.put(correlationId, cmd.replyTo());
+        pending.put(correlationId, new PendingRequest(cmd.replyTo(), cmd.getClass().getSimpleName()));
 
-        ActorRef<InvoiceReply> adapter = ctx.messageAdapter(InvoiceReply.class,
-                reply -> new CoordinatorCommand.WrappedInvoiceReply(correlationId, reply));
+        ActorRef<InvoiceReply> adapter = spawnInvoiceReplyBridge(ctx, correlationId);
 
         EntityRef<InvoiceCommand> invoiceRef =
                 sharding.entityRefFor(InvoiceAggregate.ENTITY_TYPE_KEY, cmd.invoiceId());
@@ -386,14 +377,13 @@ public final class WalletCoordinator {
     private static Behavior<CoordinatorCommand> onRecordUtxo(
             ActorContext<CoordinatorCommand> ctx,
             ClusterSharding sharding,
-            Map<String, ActorRef<CoordinatorReply>> pending,
+            Map<String, PendingRequest> pending,
             CoordinatorCommand.RecordUtxo cmd) {
 
         String correlationId = UUID.randomUUID().toString();
-        pending.put(correlationId, cmd.replyTo());
+        pending.put(correlationId, new PendingRequest(cmd.replyTo(), cmd.getClass().getSimpleName()));
 
-        ActorRef<WalletReply> adapter = ctx.messageAdapter(WalletReply.class,
-                reply -> new CoordinatorCommand.WrappedWalletReply(correlationId, reply));
+        ActorRef<WalletReply> adapter = spawnWalletReplyBridge(ctx, correlationId);
 
         EntityRef<WalletCommand> walletRef =
                 sharding.entityRefFor(WalletAggregate.ENTITY_TYPE_KEY, cmd.walletId());
@@ -408,14 +398,13 @@ public final class WalletCoordinator {
             PluginRegistry pluginRegistry,
             WalletReadModelStorage readModelStorage,
             DataSource dataSource,
-            Map<String, ActorRef<CoordinatorReply>> pending,
+            Map<String, PendingRequest> pending,
             CoordinatorCommand.RecordTransaction cmd) {
 
         String correlationId = UUID.randomUUID().toString();
-        pending.put(correlationId, cmd.replyTo());
+        pending.put(correlationId, new PendingRequest(cmd.replyTo(), cmd.getClass().getSimpleName()));
 
-        ActorRef<WalletReply> adapter = ctx.messageAdapter(WalletReply.class,
-                reply -> new CoordinatorCommand.WrappedWalletReply(correlationId, reply));
+        ActorRef<WalletReply> adapter = spawnWalletReplyBridge(ctx, correlationId);
 
         EntityRef<WalletCommand> walletRef =
                 sharding.entityRefFor(WalletAggregate.ENTITY_TYPE_KEY, cmd.walletId());
@@ -432,14 +421,13 @@ public final class WalletCoordinator {
     private static Behavior<CoordinatorCommand> onRecordAddress(
             ActorContext<CoordinatorCommand> ctx,
             ClusterSharding sharding,
-            Map<String, ActorRef<CoordinatorReply>> pending,
+            Map<String, PendingRequest> pending,
             CoordinatorCommand.RecordAddress cmd) {
 
         String correlationId = UUID.randomUUID().toString();
-        pending.put(correlationId, cmd.replyTo());
+        pending.put(correlationId, new PendingRequest(cmd.replyTo(), cmd.getClass().getSimpleName()));
 
-        ActorRef<WalletReply> adapter = ctx.messageAdapter(WalletReply.class,
-                reply -> new CoordinatorCommand.WrappedWalletReply(correlationId, reply));
+        ActorRef<WalletReply> adapter = spawnWalletReplyBridge(ctx, correlationId);
 
         EntityRef<WalletCommand> walletRef =
                 sharding.entityRefFor(WalletAggregate.ENTITY_TYPE_KEY, cmd.walletId());
@@ -452,35 +440,76 @@ public final class WalletCoordinator {
     // ── Wrapped aggregate replies ──
 
     private static Behavior<CoordinatorCommand> onWrappedWalletReply(
-            Map<String, ActorRef<CoordinatorReply>> pending,
+            Map<String, PendingRequest> pending,
             CoordinatorCommand.WrappedWalletReply cmd) {
 
-        ActorRef<CoordinatorReply> replyTo = pending.remove(cmd.correlationId());
-        if (replyTo == null) return Behaviors.same();
+        PendingRequest request = pending.remove(cmd.correlationId());
+        if (request == null) return Behaviors.same();
 
         switch (cmd.reply()) {
-            case WalletReply.Success success ->
-                    replyTo.tell(new CoordinatorReply.CommandAccepted("OK"));
+            case WalletReply.Success success -> {
+                CoordinatorReply reply = switch (request.commandType()) {
+                    case "CreateWallet" -> new CoordinatorReply.WalletCreated(
+                            success.state().getWalletId());
+                    default -> new CoordinatorReply.CommandAccepted("OK");
+                };
+                request.replyTo().tell(reply);
+            }
             case WalletReply.Failure failure ->
-                    replyTo.tell(new CoordinatorReply.Failure(failure.reason()));
+                    request.replyTo().tell(new CoordinatorReply.Failure(failure.reason()));
         }
         return Behaviors.same();
     }
 
     private static Behavior<CoordinatorCommand> onWrappedInvoiceReply(
-            Map<String, ActorRef<CoordinatorReply>> pending,
+            Map<String, PendingRequest> pending,
             CoordinatorCommand.WrappedInvoiceReply cmd) {
 
-        ActorRef<CoordinatorReply> replyTo = pending.remove(cmd.correlationId());
-        if (replyTo == null) return Behaviors.same();
+        PendingRequest request = pending.remove(cmd.correlationId());
+        if (request == null) return Behaviors.same();
 
         switch (cmd.reply()) {
-            case InvoiceReply.Success success ->
-                    replyTo.tell(new CoordinatorReply.CommandAccepted("OK"));
+            case InvoiceReply.Success success -> {
+                CoordinatorReply reply = switch (request.commandType()) {
+                    case "CreateInvoice" -> new CoordinatorReply.InvoiceCreated(
+                            success.state().getInvoiceId());
+                    case "MarkInvoicePaid" -> new CoordinatorReply.InvoicePaid(
+                            success.state().getInvoiceId());
+                    default -> new CoordinatorReply.CommandAccepted("OK");
+                };
+                request.replyTo().tell(reply);
+            }
             case InvoiceReply.Failure failure ->
-                    replyTo.tell(new CoordinatorReply.Failure(failure.reason()));
+                    request.replyTo().tell(new CoordinatorReply.Failure(failure.reason()));
         }
         return Behaviors.same();
+    }
+
+    // ── Reply bridge helpers ──
+
+    /**
+     * Spawn a short-lived anonymous actor that receives a WalletReply from an
+     * aggregate and forwards it as a WrappedWalletReply to the coordinator.
+     * Each spawn gets its own correlationId, avoiding the messageAdapter singleton
+     * problem where a second call replaces the first's lambda.
+     */
+    private static ActorRef<WalletReply> spawnWalletReplyBridge(
+            ActorContext<CoordinatorCommand> ctx, String correlationId) {
+        return ctx.spawnAnonymous(Behaviors.receiveMessage(reply -> {
+            ctx.getSelf().tell(new CoordinatorCommand.WrappedWalletReply(correlationId, reply));
+            return Behaviors.stopped();
+        }));
+    }
+
+    /**
+     * Same as above but for InvoiceReply.
+     */
+    private static ActorRef<InvoiceReply> spawnInvoiceReplyBridge(
+            ActorContext<CoordinatorCommand> ctx, String correlationId) {
+        return ctx.spawnAnonymous(Behaviors.receiveMessage(reply -> {
+            ctx.getSelf().tell(new CoordinatorCommand.WrappedInvoiceReply(correlationId, reply));
+            return Behaviors.stopped();
+        }));
     }
 
     // ── Private helpers ──
