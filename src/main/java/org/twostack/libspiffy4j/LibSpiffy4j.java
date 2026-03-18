@@ -10,6 +10,7 @@ import org.twostack.libspiffy4j.service.EncryptionService;
 import org.twostack.libspiffy4j.service.MultisigTransactionService;
 import org.twostack.libspiffy4j.service.TransactionBuildService;
 import org.twostack.libspiffy4j.service.UtxoSplitService;
+import org.twostack.libspiffy4j.spv.BlockHeaderStore;
 import org.twostack.libspiffy4j.storage.postgres.SecureStorage;
 
 import java.util.concurrent.TimeUnit;
@@ -34,6 +35,7 @@ public final class LibSpiffy4j implements AutoCloseable {
     private final UtxoSplitService utxoSplitService;
     private final PluginRegistry pluginRegistry;
     private final ActorRef<CoordinatorCommand> coordinator;
+    private final BlockHeaderStore headerStore;
     private volatile boolean closed;
 
     static String nextSystemName() {
@@ -46,7 +48,8 @@ public final class LibSpiffy4j implements AutoCloseable {
                 MultisigTransactionService multisigTransactionService,
                 UtxoSplitService utxoSplitService,
                 PluginRegistry pluginRegistry,
-                ActorRef<CoordinatorCommand> coordinator) {
+                ActorRef<CoordinatorCommand> coordinator,
+                BlockHeaderStore headerStore) {
         this.system = system;
         this.systemName = system.name();
         this.cryptoService = cryptoService;
@@ -57,6 +60,7 @@ public final class LibSpiffy4j implements AutoCloseable {
         this.utxoSplitService = utxoSplitService;
         this.pluginRegistry = pluginRegistry;
         this.coordinator = coordinator;
+        this.headerStore = headerStore;
     }
 
     public static LibSpiffy4jBuilder builder() {
@@ -102,6 +106,11 @@ public final class LibSpiffy4j implements AutoCloseable {
     /** Returns the coordinator actor for sending commands. */
     public ActorRef<CoordinatorCommand> coordinator() {
         return coordinator;
+    }
+
+    /** Returns the block header store for SPV validation. */
+    public BlockHeaderStore headerStore() {
+        return headerStore;
     }
 
     @Override

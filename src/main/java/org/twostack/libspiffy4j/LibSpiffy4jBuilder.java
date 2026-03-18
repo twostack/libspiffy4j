@@ -12,11 +12,15 @@ import org.twostack.libspiffy4j.plugin.PluginRegistry;
 import org.twostack.libspiffy4j.plugin.ScriptPlugin;
 import org.twostack.libspiffy4j.projection.InvoiceProjectionSetup;
 import org.twostack.libspiffy4j.projection.WalletProjectionSetup;
+import org.twostack.libspiffy4j.model.CdnHeaderSyncConfig;
+import org.twostack.libspiffy4j.service.CdnHeaderSyncService;
 import org.twostack.libspiffy4j.service.CryptoService;
 import org.twostack.libspiffy4j.service.EncryptionService;
 import org.twostack.libspiffy4j.service.MultisigTransactionService;
 import org.twostack.libspiffy4j.service.TransactionBuildService;
 import org.twostack.libspiffy4j.service.UtxoSplitService;
+import org.twostack.libspiffy4j.spv.BlockHeaderChain;
+import org.twostack.libspiffy4j.spv.BlockHeaderStore;
 import org.twostack.libspiffy4j.storage.postgres.SecureStorage;
 import org.twostack.libspiffy4j.storage.postgres.WalletReadModelStorage;
 
@@ -36,6 +40,8 @@ public final class LibSpiffy4jBuilder {
     Config configOverride; // package-private for testing
     private final List<ScriptPlugin> plugins = new ArrayList<>();
     private boolean loadPluginsFromServiceLoader = false;
+    private CdnHeaderSyncConfig cdnHeaderSyncConfig;
+    private BlockHeaderStore headerStore;
 
     LibSpiffy4jBuilder() {}
 
@@ -89,6 +95,25 @@ public final class LibSpiffy4jBuilder {
         return this;
     }
 
+    /**
+     * Configure CDN-based block header sync. If provided, the builder will
+     * attempt to sync headers from the CDN during build. If unavailable,
+     * the header store remains empty for the host app to populate via P2P.
+     */
+    public LibSpiffy4jBuilder cdnHeaderSync(CdnHeaderSyncConfig config) {
+        this.cdnHeaderSyncConfig = config;
+        return this;
+    }
+
+    /**
+     * Provide a custom BlockHeaderStore implementation. If not set,
+     * a default in-memory {@link BlockHeaderChain} is used.
+     */
+    public LibSpiffy4jBuilder headerStore(BlockHeaderStore store) {
+        this.headerStore = store;
+        return this;
+    }
+
     public LibSpiffy4j build() {
         if (dataSource == null) {
             throw new IllegalStateException("DataSource is required");
@@ -124,8 +149,20 @@ public final class LibSpiffy4jBuilder {
                         cryptoService, secureStorage, encryptionService, transactionBuildService),
                 "wallet-coordinator", Props.empty());
 
+        // Block header store
+        BlockHeaderStore store = this.headerStore != null ? this.headerStore : new BlockHeaderChain();
+        if (cdnHeaderSyncConfig != null) {
+            try {
+                new CdnHeaderSyncService(cdnHeaderSyncConfig, store).synchronize();
+            } catch (Exception e) {
+                // CDN unavailable — header store remains empty for P2P population
+                java.util.logging.Logger.getLogger(LibSpiffy4jBuilder.class.getName())
+                        .warning("CDN header sync failed (non-fatal): " + e.getMessage());
+            }
+        }
+
         return new LibSpiffy4j(system, cryptoService, encryptionService, secureStorage,
                 transactionBuildService, multisigTransactionService, utxoSplitService,
-                pluginRegistry, coordinator);
+                pluginRegistry, coordinator, store);
     }
 }
