@@ -59,7 +59,7 @@ class TransactionImportServiceTest {
 
         // Create stub ArcService
         ArcService stubArc = new StubArcService(
-                new ArcTransactionResponse(txidHex, ArcTransactionStatus.MINED, 100, "blockhash", 1700000000L, "rawdata"),
+                new ArcTransactionResponse(txidHex, ArcTransactionStatus.MINED, 100, "blockhash", "2026-01-01T00:00:00Z", "rawdata"),
                 new MerkleProofData(bump, 100)
         );
 
@@ -87,7 +87,7 @@ class TransactionImportServiceTest {
 
         // No header at height 999 in the chain
         ArcService stubArc = new StubArcService(
-                new ArcTransactionResponse(txidHex, ArcTransactionStatus.MINED, 999, "blockhash", 1700000000L, null),
+                new ArcTransactionResponse(txidHex, ArcTransactionStatus.MINED, 999, "blockhash", "2026-01-01T00:00:00Z", null),
                 new MerkleProofData(bump, 999)
         );
 
@@ -172,7 +172,7 @@ class TransactionImportServiceTest {
             byte[] txidBytes = reversedHexToBytes(txid);
             // Determine height based on marker byte
             int height = (txidBytes[0] == 0x01) ? 100 : 101;
-            return new ArcTransactionResponse(txid, ArcTransactionStatus.MINED, height, "hash", 0, null);
+            return new ArcTransactionResponse(txid, ArcTransactionStatus.MINED, height, "hash", null, null);
         }
 
         @Override

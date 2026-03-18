@@ -54,7 +54,7 @@ class ChainTipTrackerTest {
             @Override
             public ArcTransactionResponse queryTransaction(String txid) {
                 return new ArcTransactionResponse(txid, ArcTransactionStatus.MINED,
-                        blockHeight, "blockhash", 0, null);
+                        blockHeight, "blockhash", null, null);
             }
         };
     }

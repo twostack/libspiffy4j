@@ -81,7 +81,7 @@ class ArcServiceTest {
     @Test
     void queryTransaction_parsesFullResponse() {
         server.enqueue(new MockResponse()
-                .setBody("{\"txid\":\"abc123\",\"txStatus\":9,\"blockHeight\":800000,\"blockHash\":\"0000hash\",\"timestamp\":1700000000,\"merklePath\":\"beef\"}")
+                .setBody("{\"txid\":\"abc123\",\"txStatus\":9,\"blockHeight\":800000,\"blockHash\":\"0000hash\",\"timestamp\":\"2026-03-18T10:00:00.000Z\",\"merklePath\":\"beef\"}")
                 .setHeader("Content-Type", "application/json"));
 
         ArcTransactionResponse response = arcService.queryTransaction("abc123");
@@ -90,7 +90,7 @@ class ArcServiceTest {
         assertThat(response.status()).isEqualTo(ArcTransactionStatus.MINED);
         assertThat(response.blockHeight()).isEqualTo(800000);
         assertThat(response.blockHash()).isEqualTo("0000hash");
-        assertThat(response.timestamp()).isEqualTo(1700000000L);
+        assertThat(response.timestamp()).isEqualTo("2026-03-18T10:00:00.000Z");
     }
 
     @Test

@@ -5,7 +5,7 @@ public record ArcTransactionResponse(
         ArcTransactionStatus status,
         long blockHeight,
         String blockHash,
-        long timestamp,
+        String timestamp,
         String merklePath
 ) {
 }

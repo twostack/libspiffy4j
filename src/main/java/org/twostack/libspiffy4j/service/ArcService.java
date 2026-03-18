@@ -146,7 +146,7 @@ public class ArcService {
         int statusCode = extractJsonInt(json, "txStatus");
         long blockHeight = extractJsonLong(json, "blockHeight");
         String blockHash = extractJsonString(json, "blockHash");
-        long timestamp = extractJsonLong(json, "timestamp");
+        String timestamp = extractJsonString(json, "timestamp");
         String merklePath = extractJsonString(json, "merklePath");
         ArcTransactionStatus status = ArcTransactionStatus.fromCode(statusCode);
         return new ArcTransactionResponse(txid, status, blockHeight, blockHash, timestamp, merklePath);
