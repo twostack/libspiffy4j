@@ -168,13 +168,16 @@ public final class PaymentCoordinator {
                 return;
             }
 
-            // 13. Mark reserved UTXOs as SPENT
-            markUtxosSpent(readModelStorage, dataSource, cmd.walletId(), reserved);
+            // 13. Identify which reserved UTXOs were consumed as inputs
+            List<String> spentKeys = identifySpentInputs(result.rawHex(), reserved);
 
-            // 14. Record transaction (triggers autoRecordOutputUtxos)
+            // 14. Mark consumed UTXOs SPENT, release the rest back to AVAILABLE
+            finalizeUtxos(readModelStorage, dataSource, cmd.walletId(), reserved, spentKeys);
+
+            // 15. Record transaction (triggers autoRecordOutputUtxos)
             recordTransaction(ctx, cmd.walletId(), result.txid(), result.rawHex());
 
-            // 15. Auto-record output UTXOs
+            // 16. Auto-record output UTXOs
             autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
                     cmd.walletId(), result.txid(), result.rawHex(), addressToIndex);
 
@@ -276,19 +279,29 @@ public final class PaymentCoordinator {
                             + (ptx.purpose() != null ? " (" + ptx.purpose() + ")" : ""));
                 } catch (ArcServiceException e) {
                     LOG.log(Level.WARNING, "Broadcast failed for " + ptx.role() + " " + ptx.txid(), e);
-                    // On partial failure: wallet UTXOs already consumed by broadcast TXs
-                    // are irrecoverable. Mark them spent, don't release.
-                    markUtxosSpent(readModelStorage, dataSource, cmd.walletId(), reserved);
+                    // On partial failure: identify which wallet UTXOs were consumed
+                    // by already-broadcast TXs (the split TX). Mark those spent,
+                    // release the rest.
+                    if (!transactions.isEmpty()) {
+                        List<String> spentKeys = identifySpentInputs(
+                                transactions.get(0).rawHex(), reserved);
+                        finalizeUtxos(readModelStorage, dataSource, cmd.walletId(),
+                                reserved, spentKeys);
+                    }
                     cmd.replyTo().tell(new CoordinatorReply.Failure(
                             "Broadcast failed for " + ptx.role() + " tx " + ptx.txid() + ": " + e.getMessage()));
                     return;
                 }
             }
 
-            // All broadcasts succeeded — mark wallet UTXOs as SPENT
-            markUtxosSpent(readModelStorage, dataSource, cmd.walletId(), reserved);
+            // All broadcasts succeeded.
+            // The split TX consumed some wallet UTXOs — mark those spent, release the rest.
+            List<String> spentKeys = transactions.isEmpty()
+                    ? List.of()
+                    : identifySpentInputs(transactions.get(0).rawHex(), reserved);
+            finalizeUtxos(readModelStorage, dataSource, cmd.walletId(), reserved, spentKeys);
 
-            // Record all transactions (triggers autoRecordOutputUtxos for each)
+            // Record all transactions and auto-record output UTXOs
             for (var ptx : transactions) {
                 recordTransaction(ctx, cmd.walletId(), ptx.txid(), ptx.rawHex());
                 autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
@@ -422,20 +435,56 @@ public final class PaymentCoordinator {
         }
     }
 
-    private static void markUtxosSpent(WalletReadModelStorage storage, DataSource ds,
-                                        String walletId, List<BitcoinUtxo> utxos) {
-        if (utxos.isEmpty()) return;
+    /**
+     * Identify which wallet UTXOs were consumed as inputs in a built transaction.
+     */
+    private static List<String> identifySpentInputs(String rawHex, List<BitcoinUtxo> walletUtxos) {
+        List<String> spentKeys = new ArrayList<>();
+        if (rawHex == null || rawHex.isBlank()) return spentKeys;
+        try {
+            Transaction tx = Transaction.fromHex(rawHex);
+            Set<String> walletKeys = new HashSet<>();
+            for (BitcoinUtxo utxo : walletUtxos) {
+                walletKeys.add(utxo.key());
+            }
+            for (var input : tx.getInputs()) {
+                String prevTxid = Utils.HEX.encode(input.getPrevTxnId());
+                int prevVout = (int) input.getPrevTxnOutputIndex();
+                String key = prevTxid + ":" + prevVout;
+                if (walletKeys.contains(key)) {
+                    spentKeys.add(key);
+                }
+            }
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Failed to identify spent inputs", e);
+        }
+        return spentKeys;
+    }
+
+    /**
+     * After broadcast: mark consumed UTXOs as SPENT, release unconsumed ones
+     * back to AVAILABLE.
+     */
+    private static void finalizeUtxos(WalletReadModelStorage storage, DataSource ds,
+                                       String walletId, List<BitcoinUtxo> reserved,
+                                       List<String> spentKeys) {
+        if (reserved.isEmpty()) return;
+        Set<String> spentSet = new HashSet<>(spentKeys);
         Instant now = Instant.now();
         try (Connection conn = ds.getConnection()) {
             boolean wasAutoCommit = conn.getAutoCommit();
             if (wasAutoCommit) conn.setAutoCommit(false);
-            for (BitcoinUtxo utxo : utxos) {
-                storage.updateUtxoStatus(conn, walletId, utxo.key(), UtxoStatus.SPENT, now);
+            for (BitcoinUtxo utxo : reserved) {
+                if (spentSet.contains(utxo.key())) {
+                    storage.updateUtxoStatus(conn, walletId, utxo.key(), UtxoStatus.SPENT, now);
+                } else {
+                    storage.updateUtxoStatus(conn, walletId, utxo.key(), UtxoStatus.AVAILABLE, now);
+                }
             }
             conn.commit();
             if (wasAutoCommit) conn.setAutoCommit(true);
         } catch (Exception e) {
-            LOG.log(Level.WARNING, "Failed to mark UTXOs spent for wallet " + walletId, e);
+            LOG.log(Level.WARNING, "Failed to finalize UTXOs for wallet " + walletId, e);
         }
     }
 
