@@ -142,18 +142,29 @@ public class ArcService {
 
     static String extractJsonString(String json, String key) {
         String searchKey = "\"" + key + "\"";
-        int keyIdx = json.indexOf(searchKey);
-        if (keyIdx < 0) return null;
+        int searchFrom = 0;
+        while (true) {
+            int keyIdx = json.indexOf(searchKey, searchFrom);
+            if (keyIdx < 0) return null;
 
-        int colonIdx = json.indexOf(':', keyIdx + searchKey.length());
-        if (colonIdx < 0) return null;
+            if (keyIdx > 0) {
+                char before = json.charAt(keyIdx - 1);
+                if (before != '{' && before != ',' && !Character.isWhitespace(before)) {
+                    searchFrom = keyIdx + searchKey.length();
+                    continue;
+                }
+            }
 
-        String rest = json.substring(colonIdx + 1).trim();
-        if (rest.startsWith("null")) return null;
-        if (!rest.startsWith("\"")) return null;
+            int colonIdx = json.indexOf(':', keyIdx + searchKey.length());
+            if (colonIdx < 0) return null;
 
-        int endQuote = rest.indexOf('"', 1);
-        return rest.substring(1, endQuote);
+            String rest = json.substring(colonIdx + 1).trim();
+            if (rest.startsWith("null")) return null;
+            if (!rest.startsWith("\"")) return null;
+
+            int endQuote = rest.indexOf('"', 1);
+            return rest.substring(1, endQuote);
+        }
     }
 
     static int extractJsonInt(String json, String key) {
@@ -168,24 +179,38 @@ public class ArcService {
 
     private static String extractJsonNumber(String json, String key) {
         String searchKey = "\"" + key + "\"";
-        int keyIdx = json.indexOf(searchKey);
-        if (keyIdx < 0) return null;
+        int searchFrom = 0;
+        while (true) {
+            int keyIdx = json.indexOf(searchKey, searchFrom);
+            if (keyIdx < 0) return null;
 
-        int colonIdx = json.indexOf(':', keyIdx + searchKey.length());
-        if (colonIdx < 0) return null;
-
-        String rest = json.substring(colonIdx + 1).trim();
-        if (rest.startsWith("null")) return null;
-
-        StringBuilder num = new StringBuilder();
-        for (int i = 0; i < rest.length(); i++) {
-            char c = rest.charAt(i);
-            if (Character.isDigit(c) || c == '-') {
-                num.append(c);
-            } else if (!num.isEmpty()) {
-                break;
+            // Verify this is a real JSON key: must be preceded by { , or whitespace
+            // (not inside a string value)
+            if (keyIdx > 0) {
+                char before = json.charAt(keyIdx - 1);
+                if (before != '{' && before != ',' && !Character.isWhitespace(before)) {
+                    // Found inside a string value — skip and continue searching
+                    searchFrom = keyIdx + searchKey.length();
+                    continue;
+                }
             }
+
+            int colonIdx = json.indexOf(':', keyIdx + searchKey.length());
+            if (colonIdx < 0) return null;
+
+            String rest = json.substring(colonIdx + 1).trim();
+            if (rest.startsWith("null")) return null;
+
+            StringBuilder num = new StringBuilder();
+            for (int i = 0; i < rest.length(); i++) {
+                char c = rest.charAt(i);
+                if (Character.isDigit(c) || c == '-') {
+                    num.append(c);
+                } else if (!num.isEmpty()) {
+                    break;
+                }
+            }
+            return num.isEmpty() ? null : num.toString();
         }
-        return num.isEmpty() ? null : num.toString();
     }
 }
