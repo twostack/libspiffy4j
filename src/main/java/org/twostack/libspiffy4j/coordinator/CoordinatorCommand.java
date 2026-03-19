@@ -23,6 +23,7 @@ public sealed interface CoordinatorCommand permits
         CoordinatorCommand.MarkInvoicePaid,
         CoordinatorCommand.BuildPayment,
         CoordinatorCommand.BuildPluginPayment,
+        CoordinatorCommand.BuildPluginProvisioning,
         CoordinatorCommand.RecordUtxo,
         CoordinatorCommand.MarkUtxoSpent,
         CoordinatorCommand.RecordTransaction,
@@ -97,6 +98,17 @@ public sealed interface CoordinatorCommand permits
             String walletId, String pluginId, String action,
             Map<String, Object> pluginParams,
             TransactionBuildConfig config, String changeAddress,
+            ActorRef<CoordinatorReply> replyTo
+    ) implements CoordinatorCommand {}
+
+    /**
+     * Provision funding for a token lifecycle. Produces a batch of transactions
+     * (split + earmarks) that create earmarked UTXOs at vout=1.
+     */
+    record BuildPluginProvisioning(
+            String walletId, String pluginId,
+            Map<String, Object> pluginParams,
+            String changeAddress,
             ActorRef<CoordinatorReply> replyTo
     ) implements CoordinatorCommand {}
 

@@ -17,6 +17,7 @@ public sealed interface CoordinatorReply permits
         CoordinatorReply.InvoicePaid,
         CoordinatorReply.PaymentBuilt,
         CoordinatorReply.PluginPaymentBuilt,
+        CoordinatorReply.PluginProvisioningBuilt,
         CoordinatorReply.CommandAccepted,
         CoordinatorReply.Failure {
 
@@ -38,6 +39,10 @@ public sealed interface CoordinatorReply permits
 
     record PluginPaymentBuilt(String txid, String rawHex, long feeSats,
                                java.util.List<String> spentUtxoKeys) implements CoordinatorReply {}
+
+    record PluginProvisioningBuilt(
+            java.util.List<org.twostack.libspiffy4j.plugin.ProvisionedTransaction> transactions,
+            java.util.List<String> spentUtxoKeys) implements CoordinatorReply {}
 
     record CommandAccepted(String message) implements CoordinatorReply {}
 

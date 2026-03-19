@@ -122,6 +122,11 @@ public final class WalletCoordinator {
                             dataSource, transactionBuildService, signingActor, cmd);
                     return Behaviors.same();
                 })
+                .onMessage(CoordinatorCommand.BuildPluginProvisioning.class, cmd -> {
+                    PaymentCoordinator.buildPluginProvisioning(ctx, pluginRegistry, readModelStorage,
+                            dataSource, signingActor, cmd);
+                    return Behaviors.same();
+                })
                 .onMessage(CoordinatorCommand.RecordUtxo.class, cmd ->
                         onRecordUtxo(ctx, sharding, pendingCorrelations, cmd))
                 .onMessage(CoordinatorCommand.MarkUtxoSpent.class, cmd ->

@@ -32,4 +32,20 @@ public interface TransactionBuilderPlugin extends ScriptPlugin {
      * @return true if the transaction structure is valid for the action
      */
     boolean validateTransactionStructure(byte[] rawTx, String action);
+
+    /**
+     * Provision funding for a token lifecycle by building a tree of transactions
+     * from a single large input UTXO.
+     *
+     * <p>Returns a batch of transactions in broadcast order: a split TX (level 1)
+     * followed by earmark TXs (level 2), each placing the target funding amount
+     * at vout=1 as required by the protocol's hardcoded outpoint constraints.
+     *
+     * @param request contains funding UTXOs, signer, public keys, change address, and plugin params
+     * @return ordered list of provisioned transactions for sequential broadcast
+     * @throws UnsupportedOperationException if the plugin does not support provisioning
+     */
+    default List<ProvisionedTransaction> provisionFunding(PluginTransactionRequest request) {
+        throw new UnsupportedOperationException("Provisioning not supported by " + pluginId());
+    }
 }

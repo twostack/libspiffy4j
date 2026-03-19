@@ -149,6 +149,90 @@ public final class PaymentCoordinator {
     }
 
     /**
+     * Provision funding for a token lifecycle. Called by the {@link WalletCoordinator}
+     * when it receives a {@link CoordinatorCommand.BuildPluginProvisioning}.
+     *
+     * <p>Produces a batch of transactions (split + earmarks) for sequential broadcast.
+     */
+    public static void buildPluginProvisioning(
+            ActorContext<CoordinatorCommand> ctx,
+            PluginRegistry pluginRegistry,
+            WalletReadModelStorage readModelStorage,
+            DataSource dataSource,
+            ActorRef<WalletSigningActor.SigningCommand> signingActor,
+            CoordinatorCommand.BuildPluginProvisioning cmd) {
+
+        try {
+            Optional<TransactionBuilderPlugin> pluginOpt =
+                    pluginRegistry.getTransactionBuilderPlugin(cmd.pluginId());
+            if (pluginOpt.isEmpty()) {
+                cmd.replyTo().tell(new CoordinatorReply.Failure("Plugin not found: " + cmd.pluginId()));
+                return;
+            }
+            TransactionBuilderPlugin plugin = pluginOpt.get();
+
+            List<BitcoinUtxo> available = readModelStorage.findUtxosByStatus(
+                    dataSource, cmd.walletId(), UtxoStatus.AVAILABLE);
+            if (available.isEmpty()) {
+                cmd.replyTo().tell(new CoordinatorReply.Failure("No available UTXOs"));
+                return;
+            }
+
+            Optional<WalletSummary> summaryOpt = readModelStorage.findWalletSummary(dataSource, cmd.walletId());
+            if (summaryOpt.isEmpty()) {
+                cmd.replyTo().tell(new CoordinatorReply.Failure("Wallet not found: " + cmd.walletId()));
+                return;
+            }
+            NetworkType networkType = summaryOpt.get().networkType();
+
+            Map<String, Integer> addressToIndex = readModelStorage.findAddressIndexMap(dataSource, cmd.walletId());
+
+            WalletSigningActor.SigningReply signingReply =
+                    org.apache.pekko.actor.typed.javadsl.AskPattern.<WalletSigningActor.SigningCommand, WalletSigningActor.SigningReply>ask(
+                            signingActor,
+                            replyTo -> new WalletSigningActor.PrepareSigner(
+                                    cmd.walletId(), available, addressToIndex, networkType, replyTo),
+                            SIGNING_TIMEOUT, ctx.getSystem().scheduler()
+                    ).toCompletableFuture().get(SIGNING_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
+
+            if (signingReply instanceof WalletSigningActor.SigningFailure failure) {
+                cmd.replyTo().tell(new CoordinatorReply.Failure(failure.reason()));
+                return;
+            }
+
+            WalletSigningActor.SignerReady ready = (WalletSigningActor.SignerReady) signingReply;
+
+            TransactionLookup transactionLookup = txid -> {
+                try {
+                    return readModelStorage.findRawHexByTxid(dataSource, txid).orElse(null);
+                } catch (Exception e) {
+                    LOG.log(Level.WARNING, "Failed to look up transaction: " + txid, e);
+                    return null;
+                }
+            };
+
+            PluginTransactionRequest request = new PluginTransactionRequest(
+                    available, ready.signer(), transactionLookup,
+                    ready.publicKeyHexes(), cmd.changeAddress(), cmd.pluginParams());
+
+            LOG.info("Invoking plugin " + cmd.pluginId() + " provisionFunding");
+            List<ProvisionedTransaction> transactions = plugin.provisionFunding(request);
+            LOG.info("Provisioning returned " + transactions.size() + " transactions");
+
+            // Identify spent UTXOs from the split TX (first in the list)
+            List<String> spentUtxoKeys = transactions.isEmpty()
+                    ? List.of()
+                    : identifySpentInputs(transactions.get(0).rawHex(), available);
+
+            cmd.replyTo().tell(new CoordinatorReply.PluginProvisioningBuilt(transactions, spentUtxoKeys));
+
+        } catch (Exception e) {
+            cmd.replyTo().tell(new CoordinatorReply.Failure(
+                    "Plugin provisioning failed: " + e.getMessage()));
+        }
+    }
+
+    /**
      * Build a standard payment (non-plugin). Called by the {@link WalletCoordinator}
      * when it receives a {@link CoordinatorCommand.BuildPayment}.
      */
