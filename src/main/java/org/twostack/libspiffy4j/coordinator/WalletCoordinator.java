@@ -16,6 +16,7 @@ import org.twostack.libspiffy4j.aggregate.wallet.WalletCommand;
 import org.twostack.libspiffy4j.aggregate.wallet.WalletReply;
 import org.twostack.libspiffy4j.model.*;
 import org.twostack.libspiffy4j.plugin.PluginRegistry;
+import org.twostack.libspiffy4j.service.ArcService;
 import org.twostack.libspiffy4j.service.CryptoService;
 import org.twostack.libspiffy4j.service.EncryptionService;
 import org.twostack.libspiffy4j.service.TransactionBuildService;
@@ -56,7 +57,8 @@ public final class WalletCoordinator {
             CryptoService cryptoService,
             SecureStorage secureStorage,
             EncryptionService encryptionService,
-            TransactionBuildService transactionBuildService) {
+            TransactionBuildService transactionBuildService,
+            ArcService arcService) {
 
         return Behaviors.setup(ctx -> {
             // Initialize sharded entities
@@ -78,7 +80,7 @@ public final class WalletCoordinator {
 
             return createBehavior(ctx, sharding, pluginRegistry, readModelStorage, dataSource,
                     cryptoService, secureStorage, encryptionService, transactionBuildService,
-                    signingActor, pendingCorrelations);
+                    arcService, signingActor, pendingCorrelations);
         });
     }
 
@@ -92,6 +94,7 @@ public final class WalletCoordinator {
             SecureStorage secureStorage,
             EncryptionService encryptionService,
             TransactionBuildService transactionBuildService,
+            ArcService arcService,
             ActorRef<WalletSigningActor.SigningCommand> signingActor,
             Map<String, PendingRequest> pendingCorrelations) {
 
@@ -119,18 +122,16 @@ public final class WalletCoordinator {
                 })
                 .onMessage(CoordinatorCommand.BuildPluginPayment.class, cmd -> {
                     PaymentCoordinator.buildPluginPayment(ctx, pluginRegistry, readModelStorage,
-                            dataSource, transactionBuildService, signingActor, cmd);
+                            dataSource, transactionBuildService, arcService, signingActor, cmd);
                     return Behaviors.same();
                 })
                 .onMessage(CoordinatorCommand.BuildPluginProvisioning.class, cmd -> {
                     PaymentCoordinator.buildPluginProvisioning(ctx, pluginRegistry, readModelStorage,
-                            dataSource, signingActor, cmd);
+                            dataSource, arcService, signingActor, cmd);
                     return Behaviors.same();
                 })
                 .onMessage(CoordinatorCommand.RecordUtxo.class, cmd ->
                         onRecordUtxo(ctx, sharding, pendingCorrelations, cmd))
-                .onMessage(CoordinatorCommand.MarkUtxoSpent.class, cmd ->
-                        onMarkUtxoSpent(ctx, sharding, pendingCorrelations, cmd))
                 .onMessage(CoordinatorCommand.RecordTransaction.class, cmd ->
                         onRecordTransaction(ctx, sharding, pluginRegistry, readModelStorage,
                                 dataSource, pendingCorrelations, cmd))
@@ -370,24 +371,6 @@ public final class WalletCoordinator {
         EntityRef<WalletCommand> walletRef =
                 sharding.entityRefFor(WalletAggregate.ENTITY_TYPE_KEY, cmd.walletId());
         walletRef.tell(new WalletCommand.RecordUtxoCommand(cmd.walletId(), cmd.utxo(), adapter));
-
-        return Behaviors.same();
-    }
-
-    private static Behavior<CoordinatorCommand> onMarkUtxoSpent(
-            ActorContext<CoordinatorCommand> ctx,
-            ClusterSharding sharding,
-            Map<String, PendingRequest> pending,
-            CoordinatorCommand.MarkUtxoSpent cmd) {
-
-        String correlationId = UUID.randomUUID().toString();
-        pending.put(correlationId, new PendingRequest(cmd.replyTo(), cmd.getClass().getSimpleName()));
-
-        ActorRef<WalletReply> adapter = spawnWalletReplyBridge(ctx, correlationId);
-
-        EntityRef<WalletCommand> walletRef =
-                sharding.entityRefFor(WalletAggregate.ENTITY_TYPE_KEY, cmd.walletId());
-        walletRef.tell(new WalletCommand.MarkUtxoSpentCommand(cmd.walletId(), cmd.utxoKey(), adapter));
 
         return Behaviors.same();
     }

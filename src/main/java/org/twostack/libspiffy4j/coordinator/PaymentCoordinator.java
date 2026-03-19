@@ -1,9 +1,7 @@
 package org.twostack.libspiffy4j.coordinator;
 
 import org.apache.pekko.actor.typed.ActorRef;
-import org.apache.pekko.actor.typed.Behavior;
 import org.apache.pekko.actor.typed.javadsl.ActorContext;
-import org.apache.pekko.actor.typed.javadsl.Behaviors;
 import org.twostack.bitcoin4j.Utils;
 import org.twostack.bitcoin4j.address.LegacyAddress;
 import org.twostack.bitcoin4j.params.NetworkAddressType;
@@ -13,10 +11,13 @@ import org.twostack.bitcoin4j.transaction.Transaction;
 import org.twostack.bitcoin4j.transaction.TransactionOutput;
 import org.twostack.libspiffy4j.model.*;
 import org.twostack.libspiffy4j.plugin.*;
+import org.twostack.libspiffy4j.service.ArcService;
+import org.twostack.libspiffy4j.service.ArcServiceException;
 import org.twostack.libspiffy4j.service.TransactionBuildService;
 import org.twostack.libspiffy4j.storage.postgres.WalletReadModelStorage;
 
 import javax.sql.DataSource;
+import java.sql.Connection;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
@@ -24,8 +25,11 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * Handles payment transaction building: UTXO selection, derivation index
- * resolution, plugin invocation, and auto-recording of output UTXOs.
+ * Handles payment transaction building: UTXO selection, reservation,
+ * plugin invocation, ARC broadcast, and UTXO lifecycle management.
+ *
+ * <p>Flow: select UTXOs &rarr; reserve &rarr; build TX &rarr; broadcast &rarr;
+ * mark spent + record (on success) or release reservations (on failure).
  *
  * <p>Delegates signing to {@link WalletSigningActor} — never touches
  * private keys directly.
@@ -34,16 +38,22 @@ public final class PaymentCoordinator {
 
     private static final Logger LOG = Logger.getLogger(PaymentCoordinator.class.getName());
     private static final Duration SIGNING_TIMEOUT = Duration.ofSeconds(10);
+    private static final Duration RESERVATION_TTL = Duration.ofMinutes(5);
 
     private PaymentCoordinator() {}
 
     /**
-     * Build a plugin payment. Called by the {@link WalletCoordinator} when it
-     * receives a {@link CoordinatorCommand.BuildPluginPayment}.
+     * Build, broadcast, and record a plugin payment transaction.
      *
-     * <p>This method is synchronous within the coordinator's message processing.
-     * The signing actor ask is blocking (via CompletableFuture.get) because the
-     * plugin's {@code buildTransaction} call requires the signer synchronously.
+     * <ol>
+     *   <li>Select available UTXOs</li>
+     *   <li>Reserve selected UTXOs (AVAILABLE &rarr; RESERVED)</li>
+     *   <li>Resolve signing keys via {@link WalletSigningActor}</li>
+     *   <li>Invoke plugin to build the transaction</li>
+     *   <li>Broadcast via {@link ArcService}</li>
+     *   <li>On success: mark reserved UTXOs as SPENT, record transaction</li>
+     *   <li>On failure: release reservations (RESERVED &rarr; AVAILABLE)</li>
+     * </ol>
      */
     public static void buildPluginPayment(
             ActorContext<CoordinatorCommand> ctx,
@@ -51,9 +61,11 @@ public final class PaymentCoordinator {
             WalletReadModelStorage readModelStorage,
             DataSource dataSource,
             TransactionBuildService transactionBuildService,
+            ArcService arcService,
             ActorRef<WalletSigningActor.SigningCommand> signingActor,
             CoordinatorCommand.BuildPluginPayment cmd) {
 
+        List<BitcoinUtxo> reserved = List.of();
         try {
             // 1. Look up plugin
             Optional<TransactionBuilderPlugin> pluginOpt =
@@ -79,18 +91,23 @@ public final class PaymentCoordinator {
                 return;
             }
 
-            // 4. Look up wallet network type
+            // 4. Reserve selected UTXOs
+            reserved = available;
+            reserveUtxos(readModelStorage, dataSource, cmd.walletId(), reserved, "pending-build");
+
+            // 5. Look up wallet network type
             Optional<WalletSummary> summaryOpt = readModelStorage.findWalletSummary(dataSource, cmd.walletId());
             if (summaryOpt.isEmpty()) {
+                releaseUtxos(readModelStorage, dataSource, cmd.walletId(), reserved);
                 cmd.replyTo().tell(new CoordinatorReply.Failure("Wallet not found: " + cmd.walletId()));
                 return;
             }
             NetworkType networkType = summaryOpt.get().networkType();
 
-            // 5. Look up address → derivation index map
+            // 6. Look up address -> derivation index map
             Map<String, Integer> addressToIndex = readModelStorage.findAddressIndexMap(dataSource, cmd.walletId());
 
-            // 6. Ask signing actor for signer + public keys
+            // 7. Ask signing actor for signer + public keys
             WalletSigningActor.SigningReply signingReply =
                     org.apache.pekko.actor.typed.javadsl.AskPattern.<WalletSigningActor.SigningCommand, WalletSigningActor.SigningReply>ask(
                             signingActor,
@@ -100,6 +117,7 @@ public final class PaymentCoordinator {
                     ).toCompletableFuture().get(SIGNING_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
 
             if (signingReply instanceof WalletSigningActor.SigningFailure failure) {
+                releaseUtxos(readModelStorage, dataSource, cmd.walletId(), reserved);
                 cmd.replyTo().tell(new CoordinatorReply.Failure(failure.reason()));
                 return;
             }
@@ -108,7 +126,7 @@ public final class PaymentCoordinator {
             LOG.info("Signer ready for wallet " + cmd.walletId()
                     + " — pubKeys=" + ready.publicKeyHexes());
 
-            // 7. Create TransactionLookup
+            // 8. Create TransactionLookup
             TransactionLookup transactionLookup = txid -> {
                 try {
                     return readModelStorage.findRawHexByTxid(dataSource, txid).orElse(null);
@@ -118,50 +136,75 @@ public final class PaymentCoordinator {
                 }
             };
 
-            // 8. Build PluginTransactionRequest
+            // 9. Build PluginTransactionRequest
             PluginTransactionRequest request = new PluginTransactionRequest(
                     available, ready.signer(), transactionLookup,
                     ready.publicKeyHexes(), cmd.changeAddress(), cmd.pluginParams());
 
-            // 9. Plugin builds the complete transaction
+            // 10. Plugin builds the complete transaction
             LOG.info("Invoking plugin " + cmd.pluginId() + " action=" + cmd.action());
             TransactionBuilderResult result = plugin.buildTransaction(request);
             LOG.info("Plugin returned txid=" + result.txid() + " rawHex length=" + result.rawHex().length());
 
-            // 10. Validate transaction structure
+            // 11. Validate transaction structure
             byte[] rawTx = Utils.HEX.decode(result.rawHex());
             if (!plugin.validateTransactionStructure(rawTx, cmd.action())) {
+                releaseUtxos(readModelStorage, dataSource, cmd.walletId(), reserved);
                 cmd.replyTo().tell(new CoordinatorReply.Failure(
                         "Plugin transaction failed structure validation"));
                 return;
             }
 
-            // 11. Identify consumed input UTXOs (caller marks spent after broadcast)
-            List<String> spentUtxoKeys = identifySpentInputs(result.rawHex(), available);
+            // 12. Broadcast via ARC
+            try {
+                arcService.submitTransaction(result.rawHex());
+                LOG.info("Broadcast successful for tx " + result.txid());
+            } catch (ArcServiceException e) {
+                LOG.log(Level.WARNING, "Broadcast failed for tx " + result.txid()
+                        + " — ARC status " + e.httpStatusCode() + ": " + e.responseBody(), e);
+                releaseUtxos(readModelStorage, dataSource, cmd.walletId(), reserved);
+                cmd.replyTo().tell(new CoordinatorReply.Failure(
+                        "ARC broadcast failed: " + e.getMessage()));
+                return;
+            }
+
+            // 13. Mark reserved UTXOs as SPENT
+            markUtxosSpent(readModelStorage, dataSource, cmd.walletId(), reserved);
+
+            // 14. Record transaction (triggers autoRecordOutputUtxos)
+            recordTransaction(ctx, cmd.walletId(), result.txid(), result.rawHex());
+
+            // 15. Auto-record output UTXOs
+            autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
+                    cmd.walletId(), result.txid(), result.rawHex(), addressToIndex);
 
             cmd.replyTo().tell(new CoordinatorReply.PluginPaymentBuilt(
-                    result.txid(), result.rawHex(), result.feeSats(), spentUtxoKeys));
+                    result.txid(), result.rawHex(), result.feeSats()));
 
         } catch (Exception e) {
+            releaseUtxos(readModelStorage, dataSource, cmd.walletId(), reserved);
             cmd.replyTo().tell(new CoordinatorReply.Failure(
                     "Plugin payment failed: " + e.getMessage()));
         }
     }
 
     /**
-     * Provision funding for a token lifecycle. Called by the {@link WalletCoordinator}
-     * when it receives a {@link CoordinatorCommand.BuildPluginProvisioning}.
+     * Build, broadcast, and record provisioning transactions.
      *
-     * <p>Produces a batch of transactions (split + earmarks) for sequential broadcast.
+     * <p>Produces a batch of transactions (split + earmarks) and broadcasts them
+     * sequentially. On partial failure, UTXOs consumed by already-broadcast TXs
+     * remain SPENT; only the original wallet UTXOs are reserved/released.
      */
     public static void buildPluginProvisioning(
             ActorContext<CoordinatorCommand> ctx,
             PluginRegistry pluginRegistry,
             WalletReadModelStorage readModelStorage,
             DataSource dataSource,
+            ArcService arcService,
             ActorRef<WalletSigningActor.SigningCommand> signingActor,
             CoordinatorCommand.BuildPluginProvisioning cmd) {
 
+        List<BitcoinUtxo> reserved = List.of();
         try {
             Optional<TransactionBuilderPlugin> pluginOpt =
                     pluginRegistry.getTransactionBuilderPlugin(cmd.pluginId());
@@ -178,8 +221,13 @@ public final class PaymentCoordinator {
                 return;
             }
 
+            // Reserve wallet UTXOs
+            reserved = available;
+            reserveUtxos(readModelStorage, dataSource, cmd.walletId(), reserved, "pending-provision");
+
             Optional<WalletSummary> summaryOpt = readModelStorage.findWalletSummary(dataSource, cmd.walletId());
             if (summaryOpt.isEmpty()) {
+                releaseUtxos(readModelStorage, dataSource, cmd.walletId(), reserved);
                 cmd.replyTo().tell(new CoordinatorReply.Failure("Wallet not found: " + cmd.walletId()));
                 return;
             }
@@ -196,6 +244,7 @@ public final class PaymentCoordinator {
                     ).toCompletableFuture().get(SIGNING_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
 
             if (signingReply instanceof WalletSigningActor.SigningFailure failure) {
+                releaseUtxos(readModelStorage, dataSource, cmd.walletId(), reserved);
                 cmd.replyTo().tell(new CoordinatorReply.Failure(failure.reason()));
                 return;
             }
@@ -219,14 +268,54 @@ public final class PaymentCoordinator {
             List<ProvisionedTransaction> transactions = plugin.provisionFunding(request);
             LOG.info("Provisioning returned " + transactions.size() + " transactions");
 
-            // Identify spent UTXOs from the split TX (first in the list)
-            List<String> spentUtxoKeys = transactions.isEmpty()
-                    ? List.of()
-                    : identifySpentInputs(transactions.get(0).rawHex(), available);
+            // Broadcast all TXs sequentially (split first, then earmarks)
+            for (var ptx : transactions) {
+                try {
+                    arcService.submitTransaction(ptx.rawHex());
+                    LOG.info("Broadcast " + ptx.role() + " " + ptx.txid()
+                            + (ptx.purpose() != null ? " (" + ptx.purpose() + ")" : ""));
+                } catch (ArcServiceException e) {
+                    LOG.log(Level.WARNING, "Broadcast failed for " + ptx.role() + " " + ptx.txid(), e);
+                    // On partial failure: wallet UTXOs already consumed by broadcast TXs
+                    // are irrecoverable. Mark them spent, don't release.
+                    markUtxosSpent(readModelStorage, dataSource, cmd.walletId(), reserved);
+                    cmd.replyTo().tell(new CoordinatorReply.Failure(
+                            "Broadcast failed for " + ptx.role() + " tx " + ptx.txid() + ": " + e.getMessage()));
+                    return;
+                }
+            }
 
-            cmd.replyTo().tell(new CoordinatorReply.PluginProvisioningBuilt(transactions, spentUtxoKeys));
+            // All broadcasts succeeded — mark wallet UTXOs as SPENT
+            markUtxosSpent(readModelStorage, dataSource, cmd.walletId(), reserved);
+
+            // Record all transactions (triggers autoRecordOutputUtxos for each)
+            for (var ptx : transactions) {
+                recordTransaction(ctx, cmd.walletId(), ptx.txid(), ptx.rawHex());
+                autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
+                        cmd.walletId(), ptx.txid(), ptx.rawHex(), addressToIndex);
+            }
+
+            // Mark intermediate UTXOs as spent: split TX outputs consumed by earmark TXs
+            if (transactions.size() > 1) {
+                String splitTxid = transactions.get(0).txid();
+                for (int i = 1; i < transactions.size(); i++) {
+                    var earmark = transactions.get(i);
+                    Transaction earmarkTx = Transaction.fromHex(earmark.rawHex());
+                    for (var input : earmarkTx.getInputs()) {
+                        String prevTxid = Utils.HEX.encode(input.getPrevTxnId());
+                        int prevVout = (int) input.getPrevTxnOutputIndex();
+                        if (prevTxid.equals(splitTxid)) {
+                            markSingleUtxoSpent(readModelStorage, dataSource,
+                                    cmd.walletId(), prevTxid + ":" + prevVout);
+                        }
+                    }
+                }
+            }
+
+            cmd.replyTo().tell(new CoordinatorReply.PluginProvisioningBuilt(transactions));
 
         } catch (Exception e) {
+            releaseUtxos(readModelStorage, dataSource, cmd.walletId(), reserved);
             cmd.replyTo().tell(new CoordinatorReply.Failure(
                     "Plugin provisioning failed: " + e.getMessage()));
         }
@@ -261,7 +350,7 @@ public final class PaymentCoordinator {
             }
             NetworkType networkType = summaryOpt.get().networkType();
 
-            // 3. Look up address → derivation index map
+            // 3. Look up address -> derivation index map
             Map<String, Integer> addressToIndex = readModelStorage.findAddressIndexMap(dataSource, cmd.walletId());
 
             // 4. Ask signing actor for signer + public keys
@@ -293,6 +382,89 @@ public final class PaymentCoordinator {
         } catch (Exception e) {
             cmd.replyTo().tell(new CoordinatorReply.Failure("Payment build failed: " + e.getMessage()));
         }
+    }
+
+    // ── UTXO reservation helpers ──
+
+    private static void reserveUtxos(WalletReadModelStorage storage, DataSource ds,
+                                      String walletId, List<BitcoinUtxo> utxos,
+                                      String reservingTxId) {
+        Instant now = Instant.now();
+        Instant expiresAt = now.plus(RESERVATION_TTL);
+        try (Connection conn = ds.getConnection()) {
+            boolean wasAutoCommit = conn.getAutoCommit();
+            if (wasAutoCommit) conn.setAutoCommit(false);
+            for (BitcoinUtxo utxo : utxos) {
+                storage.updateUtxoReserved(conn, walletId, utxo.key(),
+                        reservingTxId, expiresAt, now);
+            }
+            conn.commit();
+            if (wasAutoCommit) conn.setAutoCommit(true);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Failed to reserve UTXOs for wallet " + walletId, e);
+        }
+    }
+
+    private static void releaseUtxos(WalletReadModelStorage storage, DataSource ds,
+                                      String walletId, List<BitcoinUtxo> utxos) {
+        if (utxos.isEmpty()) return;
+        Instant now = Instant.now();
+        try (Connection conn = ds.getConnection()) {
+            boolean wasAutoCommit = conn.getAutoCommit();
+            if (wasAutoCommit) conn.setAutoCommit(false);
+            for (BitcoinUtxo utxo : utxos) {
+                storage.updateUtxoStatus(conn, walletId, utxo.key(), UtxoStatus.AVAILABLE, now);
+            }
+            conn.commit();
+            if (wasAutoCommit) conn.setAutoCommit(true);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Failed to release UTXO reservations for wallet " + walletId, e);
+        }
+    }
+
+    private static void markUtxosSpent(WalletReadModelStorage storage, DataSource ds,
+                                        String walletId, List<BitcoinUtxo> utxos) {
+        if (utxos.isEmpty()) return;
+        Instant now = Instant.now();
+        try (Connection conn = ds.getConnection()) {
+            boolean wasAutoCommit = conn.getAutoCommit();
+            if (wasAutoCommit) conn.setAutoCommit(false);
+            for (BitcoinUtxo utxo : utxos) {
+                storage.updateUtxoStatus(conn, walletId, utxo.key(), UtxoStatus.SPENT, now);
+            }
+            conn.commit();
+            if (wasAutoCommit) conn.setAutoCommit(true);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Failed to mark UTXOs spent for wallet " + walletId, e);
+        }
+    }
+
+    private static void markSingleUtxoSpent(WalletReadModelStorage storage, DataSource ds,
+                                             String walletId, String utxoKey) {
+        try (Connection conn = ds.getConnection()) {
+            storage.updateUtxoStatus(conn, walletId, utxoKey, UtxoStatus.SPENT, Instant.now());
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Failed to mark UTXO spent: " + utxoKey, e);
+        }
+    }
+
+    // ── Transaction recording ──
+
+    private static void recordTransaction(ActorContext<CoordinatorCommand> ctx,
+                                           String walletId, String txid, String rawHex) {
+        Transaction tx = Transaction.fromHex(rawHex);
+        long outputValue = tx.getOutputs().stream()
+                .mapToLong(o -> o.getAmount().longValue()).sum();
+
+        BitcoinTransaction btcTx = new BitcoinTransaction(
+                walletId, txid, rawHex, TransactionStatus.BROADCAST,
+                TransactionDirection.OUTGOING, null, null,
+                0L, outputValue, 0L, 0L,
+                List.of(), List.of(),
+                Instant.now(), Instant.now(), null, 0L, 1);
+
+        ctx.getSelf().tell(new CoordinatorCommand.RecordTransaction(
+                walletId, btcTx, ctx.getSystem().ignoreRef()));
     }
 
     // ── Auto-record helpers ──
@@ -376,35 +548,6 @@ public final class PaymentCoordinator {
         );
         ctx.getSelf().tell(new CoordinatorCommand.RecordUtxo(
                 walletId, utxo, ctx.getSystem().ignoreRef()));
-    }
-
-    /**
-     * Identify which wallet UTXOs were consumed as inputs in the built transaction.
-     * Returns UTXO keys ("txid:vout") for the caller to mark spent after broadcast.
-     */
-    private static List<String> identifySpentInputs(String rawHex, List<BitcoinUtxo> availableUtxos) {
-        List<String> spentKeys = new ArrayList<>();
-        if (rawHex == null || rawHex.isBlank()) return spentKeys;
-
-        try {
-            Transaction tx = Transaction.fromHex(rawHex);
-            Set<String> availableKeys = new HashSet<>();
-            for (BitcoinUtxo utxo : availableUtxos) {
-                availableKeys.add(utxo.key());
-            }
-
-            for (var input : tx.getInputs()) {
-                String prevTxid = Utils.HEX.encode(input.getPrevTxnId());
-                int prevVout = (int) input.getPrevTxnOutputIndex();
-                String utxoKey = prevTxid + ":" + prevVout;
-                if (availableKeys.contains(utxoKey)) {
-                    spentKeys.add(utxoKey);
-                }
-            }
-        } catch (Exception e) {
-            LOG.log(Level.WARNING, "Failed to identify spent inputs", e);
-        }
-        return spentKeys;
     }
 
     static String deriveStandardAddress(Script script, NetworkAddressType addrType) {

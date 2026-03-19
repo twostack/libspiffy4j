@@ -14,6 +14,7 @@ import org.twostack.libspiffy4j.projection.InvoiceProjectionSetup;
 import org.twostack.libspiffy4j.projection.WalletProjectionSetup;
 import org.twostack.libspiffy4j.model.CdnHeaderSyncConfig;
 import org.twostack.libspiffy4j.service.CdnHeaderSyncService;
+import org.twostack.libspiffy4j.service.ArcService;
 import org.twostack.libspiffy4j.service.CryptoService;
 import org.twostack.libspiffy4j.service.EncryptionService;
 import org.twostack.libspiffy4j.service.MultisigTransactionService;
@@ -38,6 +39,7 @@ public final class LibSpiffy4jBuilder {
     private Object meterRegistry;
     private byte[] encryptionMasterKey;
     Config configOverride; // package-private for testing
+    private ArcService arcService;
     private final List<ScriptPlugin> plugins = new ArrayList<>();
     private boolean loadPluginsFromServiceLoader = false;
     private CdnHeaderSyncConfig cdnHeaderSyncConfig;
@@ -65,6 +67,16 @@ public final class LibSpiffy4jBuilder {
 
     public LibSpiffy4jBuilder configOverride(Config config) {
         this.configOverride = config;
+        return this;
+    }
+
+    /**
+     * Sets the {@link ArcService} for transaction broadcast. When provided,
+     * the coordinator will broadcast transactions after building and manage
+     * UTXO lifecycle (reserve, spend, release) internally.
+     */
+    public LibSpiffy4jBuilder arcService(ArcService arcService) {
+        this.arcService = arcService;
         return this;
     }
 
@@ -146,7 +158,8 @@ public final class LibSpiffy4jBuilder {
         ClusterSharding sharding = ClusterSharding.get(system);
         ActorRef<CoordinatorCommand> coordinator = system.systemActorOf(
                 WalletCoordinator.create(sharding, pluginRegistry, readModelStorage, dataSource,
-                        cryptoService, secureStorage, encryptionService, transactionBuildService),
+                        cryptoService, secureStorage, encryptionService, transactionBuildService,
+                        arcService),
                 "wallet-coordinator", Props.empty());
 
         // Block header store

@@ -25,7 +25,6 @@ public sealed interface CoordinatorCommand permits
         CoordinatorCommand.BuildPluginPayment,
         CoordinatorCommand.BuildPluginProvisioning,
         CoordinatorCommand.RecordUtxo,
-        CoordinatorCommand.MarkUtxoSpent,
         CoordinatorCommand.RecordTransaction,
         CoordinatorCommand.WrappedWalletReply,
         CoordinatorCommand.WrappedInvoiceReply {
@@ -122,11 +121,6 @@ public sealed interface CoordinatorCommand permits
      */
     record RecordUtxo(
             String walletId, BitcoinUtxo utxo,
-            ActorRef<CoordinatorReply> replyTo
-    ) implements CoordinatorCommand {}
-
-    record MarkUtxoSpent(
-            String walletId, String utxoKey,
             ActorRef<CoordinatorReply> replyTo
     ) implements CoordinatorCommand {}
 
