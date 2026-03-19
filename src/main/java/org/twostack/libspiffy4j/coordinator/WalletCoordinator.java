@@ -25,6 +25,8 @@ import org.twostack.libspiffy4j.storage.postgres.WalletReadModelStorage;
 
 import org.twostack.bitcoin4j.crypto.DeterministicKey;
 import org.twostack.bitcoin4j.params.NetworkAddressType;
+import org.twostack.bitcoin4j.transaction.Transaction;
+import org.twostack.libspiffy4j.plugin.ProvisionedTransaction;
 
 import javax.sql.DataSource;
 import java.time.Instant;
@@ -46,8 +48,13 @@ public final class WalletCoordinator {
 
     private WalletCoordinator() {}
 
-    /** Tracks a pending request with its reply target and originating command type. */
-    private record PendingRequest(ActorRef<CoordinatorReply> replyTo, String commandType) {}
+    /** Tracks a pending request with its reply target, command type, and optional stashed result. */
+    private record PendingRequest(ActorRef<CoordinatorReply> replyTo, String commandType,
+                                   CoordinatorReply stashedReply) {
+        PendingRequest(ActorRef<CoordinatorReply> replyTo, String commandType) {
+            this(replyTo, commandType, null);
+        }
+    }
 
     public static Behavior<CoordinatorCommand> create(
             ClusterSharding sharding,
@@ -120,16 +127,14 @@ public final class WalletCoordinator {
                             transactionBuildService, signingActor, cmd);
                     return Behaviors.same();
                 })
-                .onMessage(CoordinatorCommand.BuildPluginPayment.class, cmd -> {
-                    PaymentCoordinator.buildPluginPayment(ctx, pluginRegistry, readModelStorage,
-                            dataSource, transactionBuildService, arcService, signingActor, cmd);
-                    return Behaviors.same();
-                })
-                .onMessage(CoordinatorCommand.BuildPluginProvisioning.class, cmd -> {
-                    PaymentCoordinator.buildPluginProvisioning(ctx, pluginRegistry, readModelStorage,
-                            dataSource, arcService, signingActor, cmd);
-                    return Behaviors.same();
-                })
+                .onMessage(CoordinatorCommand.BuildPluginPayment.class, cmd ->
+                        onBuildPluginPayment(ctx, sharding, pluginRegistry, readModelStorage,
+                                dataSource, transactionBuildService, arcService, signingActor,
+                                pendingCorrelations, cmd))
+                .onMessage(CoordinatorCommand.BuildPluginProvisioning.class, cmd ->
+                        onBuildPluginProvisioning(ctx, sharding, pluginRegistry, readModelStorage,
+                                dataSource, arcService, signingActor,
+                                pendingCorrelations, cmd))
                 .onMessage(CoordinatorCommand.RecordUtxo.class, cmd ->
                         onRecordUtxo(ctx, sharding, pendingCorrelations, cmd))
                 .onMessage(CoordinatorCommand.RecordTransaction.class, cmd ->
@@ -355,6 +360,111 @@ public final class WalletCoordinator {
         return Behaviors.same();
     }
 
+    // ── Plugin payment/provisioning (two-phase: build+broadcast, then record) ──
+
+    private static Behavior<CoordinatorCommand> onBuildPluginPayment(
+            ActorContext<CoordinatorCommand> ctx,
+            ClusterSharding sharding,
+            PluginRegistry pluginRegistry,
+            WalletReadModelStorage readModelStorage,
+            DataSource dataSource,
+            TransactionBuildService transactionBuildService,
+            ArcService arcService,
+            ActorRef<WalletSigningActor.SigningCommand> signingActor,
+            Map<String, PendingRequest> pending,
+            CoordinatorCommand.BuildPluginPayment cmd) {
+
+        CoordinatorReply result = PaymentCoordinator.buildPluginPayment(ctx, pluginRegistry,
+                readModelStorage, dataSource, transactionBuildService, arcService, signingActor, cmd);
+
+        if (result instanceof CoordinatorReply.Failure) {
+            cmd.replyTo().tell(result);
+            return Behaviors.same();
+        }
+
+        // Phase 2: record the transaction through the aggregate, reply when persisted
+        CoordinatorReply.PluginPaymentBuilt built = (CoordinatorReply.PluginPaymentBuilt) result;
+
+        String correlationId = UUID.randomUUID().toString();
+        pending.put(correlationId, new PendingRequest(cmd.replyTo(), "BuildPluginPayment", built));
+
+        ActorRef<WalletReply> adapter = spawnWalletReplyBridge(ctx, correlationId);
+        BitcoinTransaction btcTx = toBitcoinTransaction(cmd.walletId(), built.txid(), built.rawHex());
+
+        EntityRef<WalletCommand> walletRef =
+                sharding.entityRefFor(WalletAggregate.ENTITY_TYPE_KEY, cmd.walletId());
+        walletRef.tell(new WalletCommand.RecordTransactionCommand(cmd.walletId(), btcTx, adapter));
+
+        // Auto-record wallet-owned output UTXOs
+        PaymentCoordinator.autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
+                cmd.walletId(), built.txid(), built.rawHex(), null);
+
+        return Behaviors.same();
+    }
+
+    private static Behavior<CoordinatorCommand> onBuildPluginProvisioning(
+            ActorContext<CoordinatorCommand> ctx,
+            ClusterSharding sharding,
+            PluginRegistry pluginRegistry,
+            WalletReadModelStorage readModelStorage,
+            DataSource dataSource,
+            ArcService arcService,
+            ActorRef<WalletSigningActor.SigningCommand> signingActor,
+            Map<String, PendingRequest> pending,
+            CoordinatorCommand.BuildPluginProvisioning cmd) {
+
+        CoordinatorReply result = PaymentCoordinator.buildPluginProvisioning(ctx, pluginRegistry,
+                readModelStorage, dataSource, arcService, signingActor, cmd);
+
+        if (result instanceof CoordinatorReply.Failure) {
+            cmd.replyTo().tell(result);
+            return Behaviors.same();
+        }
+
+        CoordinatorReply.PluginProvisioningBuilt built = (CoordinatorReply.PluginProvisioningBuilt) result;
+        java.util.List<ProvisionedTransaction> transactions = built.transactions();
+
+        // Record each TX through the aggregate. Stash the caller's replyTo on the
+        // last correlation — Pekko processes messages to the same entity in order,
+        // so when the last reply arrives, all prior recordings have completed.
+        for (int i = 0; i < transactions.size(); i++) {
+            ProvisionedTransaction ptx = transactions.get(i);
+            String correlationId = UUID.randomUUID().toString();
+            boolean isLast = (i == transactions.size() - 1);
+
+            if (isLast) {
+                pending.put(correlationId, new PendingRequest(cmd.replyTo(), "BuildPluginProvisioning", built));
+            } else {
+                pending.put(correlationId, new PendingRequest(ctx.getSystem().ignoreRef(), "RecordTransaction"));
+            }
+
+            ActorRef<WalletReply> adapter = spawnWalletReplyBridge(ctx, correlationId);
+            BitcoinTransaction btcTx = toBitcoinTransaction(cmd.walletId(), ptx.txid(), ptx.rawHex());
+
+            EntityRef<WalletCommand> walletRef =
+                    sharding.entityRefFor(WalletAggregate.ENTITY_TYPE_KEY, cmd.walletId());
+            walletRef.tell(new WalletCommand.RecordTransactionCommand(cmd.walletId(), btcTx, adapter));
+
+            // Auto-record output UTXOs for each TX
+            PaymentCoordinator.autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
+                    cmd.walletId(), ptx.txid(), ptx.rawHex(), null);
+        }
+
+        return Behaviors.same();
+    }
+
+    private static BitcoinTransaction toBitcoinTransaction(String walletId, String txid, String rawHex) {
+        Transaction tx = Transaction.fromHex(rawHex);
+        long outputValue = tx.getOutputs().stream()
+                .mapToLong(o -> o.getAmount().longValue()).sum();
+        return new BitcoinTransaction(
+                walletId, txid, rawHex, TransactionStatus.BROADCAST,
+                TransactionDirection.OUTGOING, null, null,
+                0L, outputValue, 0L, 0L,
+                java.util.List.of(), java.util.List.of(),
+                Instant.now(), Instant.now(), null, 0L, 1);
+    }
+
     // ── UTXO/Transaction recording ──
 
     private static Behavior<CoordinatorCommand> onRecordUtxo(
@@ -412,12 +522,17 @@ public final class WalletCoordinator {
 
         switch (cmd.reply()) {
             case WalletReply.Success success -> {
-                CoordinatorReply reply = switch (request.commandType()) {
-                    case "CreateWallet" -> new CoordinatorReply.WalletCreated(
-                            success.state().getWalletId());
-                    default -> new CoordinatorReply.CommandAccepted("OK");
-                };
-                request.replyTo().tell(reply);
+                if (request.stashedReply() != null) {
+                    // Two-phase command: return the stashed build result now that recording is confirmed
+                    request.replyTo().tell(request.stashedReply());
+                } else {
+                    CoordinatorReply reply = switch (request.commandType()) {
+                        case "CreateWallet" -> new CoordinatorReply.WalletCreated(
+                                success.state().getWalletId());
+                        default -> new CoordinatorReply.CommandAccepted("OK");
+                    };
+                    request.replyTo().tell(reply);
+                }
             }
             case WalletReply.Failure failure ->
                     request.replyTo().tell(new CoordinatorReply.Failure(failure.reason()));
