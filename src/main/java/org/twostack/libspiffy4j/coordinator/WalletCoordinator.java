@@ -299,7 +299,7 @@ public final class WalletCoordinator {
             WalletReadModelStorage storage, DataSource ds,
             CoordinatorCommand.GetUtxos cmd) {
         try {
-            List<BitcoinUtxo> utxos = storage.findUtxosByWalletId(ds, cmd.walletId());
+            List<BitcoinUtxo> utxos = storage.findUtxosByStatus(ds, cmd.walletId(), UtxoStatus.AVAILABLE);
             cmd.replyTo().tell(new CoordinatorReply.UtxosResult(utxos));
         } catch (Exception e) {
             cmd.replyTo().tell(new CoordinatorReply.Failure("Failed to get UTXOs: " + e.getMessage()));
