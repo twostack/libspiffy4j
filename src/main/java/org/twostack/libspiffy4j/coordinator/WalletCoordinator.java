@@ -124,6 +124,8 @@ public final class WalletCoordinator {
                         onGetUtxoInventory(readModelStorage, dataSource, cmd))
                 .onMessage(CoordinatorCommand.GetBeefEnvelope.class, cmd ->
                         onGetBeefEnvelope(readModelStorage, dataSource, arcService, cmd))
+                .onMessage(CoordinatorCommand.ReleaseExpiredReservations.class, cmd ->
+                        onReleaseExpiredReservations(readModelStorage, dataSource, cmd))
                 .onMessage(CoordinatorCommand.CreateInvoice.class, cmd ->
                         onCreateInvoice(ctx, sharding, pendingCorrelations, cmd))
                 .onMessage(CoordinatorCommand.MarkInvoicePaid.class, cmd ->
@@ -364,6 +366,23 @@ public final class WalletCoordinator {
         return Behaviors.same();
     }
 
+    private static Behavior<CoordinatorCommand> onReleaseExpiredReservations(
+            WalletReadModelStorage storage, DataSource ds,
+            CoordinatorCommand.ReleaseExpiredReservations cmd) {
+        try {
+            int released = storage.releaseExpiredReservations(ds);
+            if (released > 0) {
+                LOG.info("Released " + released + " expired UTXO reservations");
+            }
+            cmd.replyTo().tell(new CoordinatorReply.CommandAccepted(
+                    "Released " + released + " expired reservations"));
+        } catch (Exception e) {
+            cmd.replyTo().tell(new CoordinatorReply.Failure(
+                    "Failed to release expired reservations: " + e.getMessage()));
+        }
+        return Behaviors.same();
+    }
+
     private static Behavior<CoordinatorCommand> onGetBeefEnvelope(
             WalletReadModelStorage storage, DataSource ds, ArcService arcService,
             CoordinatorCommand.GetBeefEnvelope cmd) {
@@ -557,14 +576,14 @@ public final class WalletCoordinator {
             walletRef.tell(new WalletCommand.RecordTransactionCommand(cmd.walletId(), btcTx, adapter));
 
             // Auto-record output UTXOs — tag earmark TXs with purpose metadata.
-            // Skip the split TX: its outputs are intermediate (consumed by earmark TXs)
-            // and are already marked spent by PaymentCoordinator. Recording them as
-            // AVAILABLE would create a race where other operations could select them.
+            // For the split TX, still record outputs (the change output is needed)
+            // but PaymentCoordinator will mark the intermediate outputs as SPENT
+            // after earmark TXs consume them.
             if (ptx.purpose() != null && ptx.fundingVout() >= 0) {
                 PaymentCoordinator.autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
                         cmd.walletId(), ptx.txid(), ptx.rawHex(), null,
                         ptx.purpose(), ptx.fundingVout());
-            } else if (!"split".equals(ptx.role())) {
+            } else {
                 PaymentCoordinator.autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
                         cmd.walletId(), ptx.txid(), ptx.rawHex(), null);
             }

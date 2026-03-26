@@ -22,6 +22,7 @@ public sealed interface CoordinatorCommand permits
         CoordinatorCommand.ConfigureUtxoPolicy,
         CoordinatorCommand.GetUtxoInventory,
         CoordinatorCommand.GetBeefEnvelope,
+        CoordinatorCommand.ReleaseExpiredReservations,
         CoordinatorCommand.CreateInvoice,
         CoordinatorCommand.MarkInvoicePaid,
         CoordinatorCommand.BuildPayment,
@@ -101,6 +102,13 @@ public sealed interface CoordinatorCommand permits
     record GetBeefEnvelope(
             String walletId,
             String txid,
+            ActorRef<CoordinatorReply> replyTo
+    ) implements CoordinatorCommand {}
+
+    /**
+     * Release UTXOs whose reservations have expired back to AVAILABLE.
+     */
+    record ReleaseExpiredReservations(
             ActorRef<CoordinatorReply> replyTo
     ) implements CoordinatorCommand {}
 

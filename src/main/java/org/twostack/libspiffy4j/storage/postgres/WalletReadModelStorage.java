@@ -544,6 +544,25 @@ public class WalletReadModelStorage {
         );
     }
 
+    /**
+     * Release UTXOs with expired reservations back to AVAILABLE.
+     * Returns the number of UTXOs released.
+     */
+    public int releaseExpiredReservations(DataSource ds) throws SQLException {
+        String sql = """
+                UPDATE wallet_utxo
+                SET status = 'AVAILABLE', reserved_by_tx_id = NULL, reservation_expires_at = NULL,
+                    updated_at = NOW()
+                WHERE status = 'RESERVED'
+                AND reservation_expires_at IS NOT NULL
+                AND reservation_expires_at < NOW()
+                """;
+        try (Connection conn = ds.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            return ps.executeUpdate();
+        }
+    }
+
     // ── UTXO inventory + policy ──
 
     /**
