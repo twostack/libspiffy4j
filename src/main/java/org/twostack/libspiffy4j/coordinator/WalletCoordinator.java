@@ -122,6 +122,8 @@ public final class WalletCoordinator {
                         onConfigureUtxoPolicy(readModelStorage, dataSource, cmd))
                 .onMessage(CoordinatorCommand.GetUtxoInventory.class, cmd ->
                         onGetUtxoInventory(readModelStorage, dataSource, cmd))
+                .onMessage(CoordinatorCommand.GetBeefEnvelope.class, cmd ->
+                        onGetBeefEnvelope(readModelStorage, dataSource, arcService, cmd))
                 .onMessage(CoordinatorCommand.CreateInvoice.class, cmd ->
                         onCreateInvoice(ctx, sharding, pendingCorrelations, cmd))
                 .onMessage(CoordinatorCommand.MarkInvoicePaid.class, cmd ->
@@ -358,6 +360,31 @@ public final class WalletCoordinator {
             cmd.replyTo().tell(new CoordinatorReply.UtxoInventoryResult(inventory));
         } catch (Exception e) {
             cmd.replyTo().tell(new CoordinatorReply.Failure("Failed to get UTXO inventory: " + e.getMessage()));
+        }
+        return Behaviors.same();
+    }
+
+    private static Behavior<CoordinatorCommand> onGetBeefEnvelope(
+            WalletReadModelStorage storage, DataSource ds, ArcService arcService,
+            CoordinatorCommand.GetBeefEnvelope cmd) {
+        try {
+            Optional<String> rawHexOpt = storage.findRawHexByTxid(ds, cmd.txid());
+            if (rawHexOpt.isEmpty()) {
+                cmd.replyTo().tell(new CoordinatorReply.Failure(
+                        "Transaction not found in wallet: " + cmd.txid()));
+                return Behaviors.same();
+            }
+            String beefHex = PaymentCoordinator.buildBeefEnvelope(
+                    rawHexOpt.get(), storage, ds, arcService);
+            if (beefHex != null) {
+                cmd.replyTo().tell(new CoordinatorReply.BeefEnvelopeResult(beefHex));
+            } else {
+                cmd.replyTo().tell(new CoordinatorReply.Failure(
+                        "BEEF construction failed for TX: " + cmd.txid()));
+            }
+        } catch (Exception e) {
+            cmd.replyTo().tell(new CoordinatorReply.Failure(
+                    "Failed to build BEEF envelope: " + e.getMessage()));
         }
         return Behaviors.same();
     }

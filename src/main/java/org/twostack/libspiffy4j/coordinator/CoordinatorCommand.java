@@ -21,6 +21,7 @@ public sealed interface CoordinatorCommand permits
         CoordinatorCommand.GetUtxos,
         CoordinatorCommand.ConfigureUtxoPolicy,
         CoordinatorCommand.GetUtxoInventory,
+        CoordinatorCommand.GetBeefEnvelope,
         CoordinatorCommand.CreateInvoice,
         CoordinatorCommand.MarkInvoicePaid,
         CoordinatorCommand.BuildPayment,
@@ -89,6 +90,17 @@ public sealed interface CoordinatorCommand permits
      */
     record GetUtxoInventory(
             String walletId,
+            ActorRef<CoordinatorReply> replyTo
+    ) implements CoordinatorCommand {}
+
+    /**
+     * Construct a BEEF envelope for a transaction in the wallet's read model.
+     * The BEEF includes proven ancestors (with merkle proofs) and unproven
+     * intermediate ancestors, recursively resolved.
+     */
+    record GetBeefEnvelope(
+            String walletId,
+            String txid,
             ActorRef<CoordinatorReply> replyTo
     ) implements CoordinatorCommand {}
 

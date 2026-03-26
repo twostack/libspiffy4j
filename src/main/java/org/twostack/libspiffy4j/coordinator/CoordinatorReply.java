@@ -18,6 +18,7 @@ public sealed interface CoordinatorReply permits
         CoordinatorReply.TransactionsResult,
         CoordinatorReply.UtxosResult,
         CoordinatorReply.UtxoInventoryResult,
+        CoordinatorReply.BeefEnvelopeResult,
         CoordinatorReply.WalletFundingNeeded,
         CoordinatorReply.InvoiceCreated,
         CoordinatorReply.InvoicePaid,
@@ -38,6 +39,8 @@ public sealed interface CoordinatorReply permits
     record UtxosResult(List<BitcoinUtxo> utxos) implements CoordinatorReply {}
 
     record UtxoInventoryResult(UtxoInventory inventory) implements CoordinatorReply {}
+
+    record BeefEnvelopeResult(String beefHex) implements CoordinatorReply {}
 
     record WalletFundingNeeded(String walletId, long currentBalanceSats, long requiredBalanceSats,
                                 String reason) implements CoordinatorReply {}
