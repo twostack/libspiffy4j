@@ -556,12 +556,15 @@ public final class WalletCoordinator {
                     sharding.entityRefFor(WalletAggregate.ENTITY_TYPE_KEY, cmd.walletId());
             walletRef.tell(new WalletCommand.RecordTransactionCommand(cmd.walletId(), btcTx, adapter));
 
-            // Auto-record output UTXOs — tag earmark TXs with purpose metadata
+            // Auto-record output UTXOs — tag earmark TXs with purpose metadata.
+            // Skip the split TX: its outputs are intermediate (consumed by earmark TXs)
+            // and are already marked spent by PaymentCoordinator. Recording them as
+            // AVAILABLE would create a race where other operations could select them.
             if (ptx.purpose() != null && ptx.fundingVout() >= 0) {
                 PaymentCoordinator.autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
                         cmd.walletId(), ptx.txid(), ptx.rawHex(), null,
                         ptx.purpose(), ptx.fundingVout());
-            } else {
+            } else if (!"split".equals(ptx.role())) {
                 PaymentCoordinator.autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
                         cmd.walletId(), ptx.txid(), ptx.rawHex(), null);
             }

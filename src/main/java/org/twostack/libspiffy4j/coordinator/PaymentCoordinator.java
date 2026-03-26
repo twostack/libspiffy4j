@@ -160,12 +160,23 @@ public final class PaymentCoordinator {
             String beefHex = buildBeefEnvelope(result.rawHex(), readModelStorage, dataSource, arcService);
 
             try {
+                ArcSubmitResponse arcResponse;
                 if (beefHex != null) {
-                    arcService.submitBeef(beefHex);
-                    LOG.info("Broadcast successful (BEEF) for tx " + result.txid());
+                    arcResponse = arcService.submitBeef(beefHex);
+                    LOG.info("Broadcast (BEEF) for tx " + result.txid()
+                            + " — ARC status: " + arcResponse.status());
                 } else {
-                    arcService.submitTransaction(result.rawHex());
-                    LOG.info("Broadcast successful (raw) for tx " + result.txid());
+                    arcResponse = arcService.submitTransaction(result.rawHex());
+                    LOG.info("Broadcast (raw) for tx " + result.txid()
+                            + " — ARC status: " + arcResponse.status());
+                }
+
+                if (arcResponse.status() == ArcTransactionStatus.SEEN_IN_ORPHAN_MEMPOOL) {
+                    LOG.warning("TX " + result.txid() + " landed in orphan mempool — "
+                            + "parent TX may be missing or spent");
+                    releaseUtxos(readModelStorage, dataSource, cmd.walletId(), reserved);
+                    return new CoordinatorReply.Failure(
+                            "ARC accepted TX but placed in orphan mempool — parent TX may be invalid");
                 }
             } catch (ArcServiceException e) {
                 LOG.log(Level.WARNING, "Broadcast failed for tx " + result.txid()
@@ -376,9 +387,16 @@ public final class PaymentCoordinator {
 
             for (var ptx : transactions) {
                 try {
-                    arcService.submitTransaction(ptx.rawHex());
+                    ArcSubmitResponse arcResponse = arcService.submitTransaction(ptx.rawHex());
                     LOG.info("Broadcast " + ptx.role() + " " + ptx.txid()
-                            + (ptx.purpose() != null ? " (" + ptx.purpose() + ")" : ""));
+                            + (ptx.purpose() != null ? " (" + ptx.purpose() + ")" : "")
+                            + " — ARC status: " + arcResponse.status());
+
+                    if (arcResponse.status() == ArcTransactionStatus.SEEN_IN_ORPHAN_MEMPOOL) {
+                        throw new ArcServiceException(
+                                "TX placed in orphan mempool — parent TX may be missing",
+                                200, "txStatus: SEEN_IN_ORPHAN_MEMPOOL");
+                    }
                 } catch (ArcServiceException e) {
                     LOG.log(Level.WARNING, "Broadcast failed for " + ptx.role() + " " + ptx.txid(), e);
                     if (!transactions.isEmpty()) {
