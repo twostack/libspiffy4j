@@ -54,6 +54,7 @@ public class ArcService {
             addAuthHeader(builder);
             if (callbackUrl != null && !callbackUrl.isBlank()) {
                 builder.header("X-CallbackUrl", callbackUrl);
+                builder.header("X-FullStatusUpdates", "true");
             }
 
             HttpResponse<String> response = httpClient.send(builder.build(),
@@ -86,6 +87,7 @@ public class ArcService {
             addAuthHeader(builder);
             if (config.defaultCallbackUrl() != null && !config.defaultCallbackUrl().isBlank()) {
                 builder.header("X-CallbackUrl", config.defaultCallbackUrl());
+                builder.header("X-FullStatusUpdates", "true");
             }
 
             HttpResponse<String> response = httpClient.send(builder.build(),
