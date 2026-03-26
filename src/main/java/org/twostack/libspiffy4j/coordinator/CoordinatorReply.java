@@ -1,6 +1,10 @@
 package org.twostack.libspiffy4j.coordinator;
 
-import org.twostack.libspiffy4j.model.*;
+import org.twostack.libspiffy4j.model.BitcoinTransaction;
+import org.twostack.libspiffy4j.model.BitcoinUtxo;
+import org.twostack.libspiffy4j.model.TransactionBuildResult;
+import org.twostack.libspiffy4j.model.UtxoInventory;
+import org.twostack.libspiffy4j.model.WalletBalance;
 
 import java.util.List;
 
@@ -13,6 +17,8 @@ public sealed interface CoordinatorReply permits
         CoordinatorReply.BalanceResult,
         CoordinatorReply.TransactionsResult,
         CoordinatorReply.UtxosResult,
+        CoordinatorReply.UtxoInventoryResult,
+        CoordinatorReply.WalletFundingNeeded,
         CoordinatorReply.InvoiceCreated,
         CoordinatorReply.InvoicePaid,
         CoordinatorReply.PaymentBuilt,
@@ -31,13 +37,18 @@ public sealed interface CoordinatorReply permits
 
     record UtxosResult(List<BitcoinUtxo> utxos) implements CoordinatorReply {}
 
+    record UtxoInventoryResult(UtxoInventory inventory) implements CoordinatorReply {}
+
+    record WalletFundingNeeded(String walletId, long currentBalanceSats, long requiredBalanceSats,
+                                String reason) implements CoordinatorReply {}
+
     record InvoiceCreated(String invoiceId) implements CoordinatorReply {}
 
     record InvoicePaid(String invoiceId) implements CoordinatorReply {}
 
     record PaymentBuilt(TransactionBuildResult result) implements CoordinatorReply {}
 
-    record PluginPaymentBuilt(String txid, String rawHex, long feeSats) implements CoordinatorReply {}
+    record PluginPaymentBuilt(String txid, String rawHex, String beefHex, long feeSats) implements CoordinatorReply {}
 
     record PluginProvisioningBuilt(
             java.util.List<org.twostack.libspiffy4j.plugin.ProvisionedTransaction> transactions) implements CoordinatorReply {}

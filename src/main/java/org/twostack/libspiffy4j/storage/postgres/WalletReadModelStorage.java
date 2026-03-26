@@ -233,6 +233,29 @@ public class WalletReadModelStorage {
         }
     }
 
+    public void storeMerkleProof(Connection conn, String txid, String merkleProofHex) throws SQLException {
+        String sql = "UPDATE wallet_transaction SET merkle_proof_hex = ? WHERE txid = ? AND merkle_proof_hex IS NULL";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, merkleProofHex);
+            ps.setString(2, txid);
+            ps.executeUpdate();
+        }
+    }
+
+    public Optional<String> findMerkleProofByTxid(DataSource ds, String txid) throws SQLException {
+        String sql = "SELECT merkle_proof_hex FROM wallet_transaction WHERE txid = ? AND merkle_proof_hex IS NOT NULL LIMIT 1";
+        try (Connection conn = ds.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, txid);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return Optional.ofNullable(rs.getString("merkle_proof_hex"));
+                }
+                return Optional.empty();
+            }
+        }
+    }
+
     public void updateWalletBalances(Connection conn, String walletId) throws SQLException {
         String sql = """
                 UPDATE wallet_summary SET
@@ -467,7 +490,10 @@ public class WalletReadModelStorage {
                 rs.getInt("address_count"),
                 rs.getInt("utxo_count"),
                 rs.getTimestamp("created_at").toInstant(),
-                metadata
+                metadata,
+                rs.getInt("target_lifecycle_steps"),
+                rs.getInt("low_utxo_threshold"),
+                rs.getBoolean("auto_provision_enabled")
         );
     }
 
@@ -516,6 +542,91 @@ public class WalletReadModelStorage {
                 rs.getTimestamp("updated_at").toInstant(),
                 null, 0, 0
         );
+    }
+
+    // ── UTXO inventory + policy ──
+
+    /**
+     * Get UTXO inventory counts and sats for a wallet, broken down by earmark purpose.
+     * Available = status AVAILABLE with no plugin_id (general-purpose funding).
+     * Per-purpose = status AVAILABLE with plugin_id 'funding-earmark' and matching purpose.
+     */
+    public UtxoInventory getUtxoInventory(DataSource ds, String walletId, UtxoPolicy policy) throws SQLException {
+        String sql = """
+                SELECT
+                    COALESCE(SUM(CASE WHEN status = 'AVAILABLE' AND plugin_id IS NULL
+                        THEN 1 ELSE 0 END), 0) AS available_count,
+                    COALESCE(SUM(CASE WHEN status = 'AVAILABLE' AND plugin_id IS NULL
+                        THEN value_sats ELSE 0 END), 0) AS available_sats,
+                    COALESCE(SUM(CASE WHEN status = 'AVAILABLE' AND plugin_id = 'funding-earmark'
+                        AND plugin_metadata->>'purpose' = 'issuance-witness'
+                        THEN 1 ELSE 0 END), 0) AS iw_count,
+                    COALESCE(SUM(CASE WHEN status = 'AVAILABLE' AND plugin_id = 'funding-earmark'
+                        AND plugin_metadata->>'purpose' = 'issuance-witness'
+                        THEN value_sats ELSE 0 END), 0) AS iw_sats,
+                    COALESCE(SUM(CASE WHEN status = 'AVAILABLE' AND plugin_id = 'funding-earmark'
+                        AND plugin_metadata->>'purpose' = 'transfer'
+                        THEN 1 ELSE 0 END), 0) AS xfer_count,
+                    COALESCE(SUM(CASE WHEN status = 'AVAILABLE' AND plugin_id = 'funding-earmark'
+                        AND plugin_metadata->>'purpose' = 'transfer'
+                        THEN value_sats ELSE 0 END), 0) AS xfer_sats,
+                    COALESCE(SUM(CASE WHEN status = 'AVAILABLE' AND plugin_id = 'funding-earmark'
+                        AND plugin_metadata->>'purpose' = 'transfer-witness'
+                        THEN 1 ELSE 0 END), 0) AS xw_count,
+                    COALESCE(SUM(CASE WHEN status = 'AVAILABLE' AND plugin_id = 'funding-earmark'
+                        AND plugin_metadata->>'purpose' = 'transfer-witness'
+                        THEN value_sats ELSE 0 END), 0) AS xw_sats
+                FROM wallet_utxo
+                WHERE wallet_id = ? AND status != 'SPENT'
+                """;
+        try (Connection conn = ds.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, walletId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    int availableCount = rs.getInt("available_count");
+                    long availableSats = rs.getLong("available_sats");
+                    int iwCount = rs.getInt("iw_count");
+                    long iwSats = rs.getLong("iw_sats");
+                    int xferCount = rs.getInt("xfer_count");
+                    long xferSats = rs.getLong("xfer_sats");
+                    int xwCount = rs.getInt("xw_count");
+                    long xwSats = rs.getLong("xw_sats");
+
+                    int lifecycleSteps = Math.min(iwCount, Math.min(xferCount, xwCount));
+
+                    UtxoInventory.PolicyStatus status;
+                    if (availableCount == 0 && lifecycleSteps == 0) {
+                        status = UtxoInventory.PolicyStatus.DEPLETED;
+                    } else if (lifecycleSteps < policy.lowThreshold()) {
+                        status = UtxoInventory.PolicyStatus.LOW;
+                    } else {
+                        status = UtxoInventory.PolicyStatus.SUFFICIENT;
+                    }
+
+                    return new UtxoInventory(availableCount, availableSats,
+                            iwCount, iwSats, xferCount, xferSats, xwCount, xwSats,
+                            lifecycleSteps, status);
+                }
+                return new UtxoInventory(0, 0L, 0, 0L, 0, 0L, 0, 0L, 0,
+                        UtxoInventory.PolicyStatus.DEPLETED);
+            }
+        }
+    }
+
+    public void updateUtxoPolicy(Connection conn, String walletId, UtxoPolicy policy) throws SQLException {
+        String sql = """
+                UPDATE wallet_summary
+                SET target_lifecycle_steps = ?, low_utxo_threshold = ?, auto_provision_enabled = ?
+                WHERE wallet_id = ?
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, policy.targetLifecycleSteps());
+            ps.setInt(2, policy.lowThreshold());
+            ps.setBoolean(3, policy.autoProvisionEnabled());
+            ps.setString(4, walletId);
+            ps.executeUpdate();
+        }
     }
 
     // ── Plugin queries ──

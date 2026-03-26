@@ -169,14 +169,34 @@ public class ArcService {
 
     static int extractJsonInt(String json, String key) {
         String raw = extractJsonNumber(json, key);
-        return raw == null ? 0 : Integer.parseInt(raw);
+        if (raw == null) return 0;
+        try {
+            return Integer.parseInt(raw);
+        } catch (NumberFormatException e) {
+            // Parser extracted a non-integer value (e.g., digits from a txid).
+            // Return 0 rather than crash — the caller treats 0 as unknown status.
+            return 0;
+        }
     }
 
     static long extractJsonLong(String json, String key) {
         String raw = extractJsonNumber(json, key);
-        return raw == null ? 0L : Long.parseLong(raw);
+        if (raw == null) return 0L;
+        try {
+            return Long.parseLong(raw);
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
     }
 
+    /**
+     * Extract a numeric value from a JSON string by key.
+     *
+     * <p>The key must appear as a proper JSON key — preceded by {@code {}, {@code ,},
+     * or whitespace, and immediately followed by {@code ":} with at most whitespace
+     * between the closing quote and the colon. This prevents matching keys that appear
+     * as substrings of other keys or inside string values.
+     */
     private static String extractJsonNumber(String json, String key) {
         String searchKey = "\"" + key + "\"";
         int searchFrom = 0;
@@ -184,22 +204,35 @@ public class ArcService {
             int keyIdx = json.indexOf(searchKey, searchFrom);
             if (keyIdx < 0) return null;
 
-            // Verify this is a real JSON key: must be preceded by { , or whitespace
-            // (not inside a string value)
+            // Guard: the key must be a real JSON key, not a substring of a value.
+            // A real key is preceded by { , or whitespace.
             if (keyIdx > 0) {
                 char before = json.charAt(keyIdx - 1);
                 if (before != '{' && before != ',' && !Character.isWhitespace(before)) {
-                    // Found inside a string value — skip and continue searching
                     searchFrom = keyIdx + searchKey.length();
                     continue;
                 }
             }
 
-            int colonIdx = json.indexOf(':', keyIdx + searchKey.length());
-            if (colonIdx < 0) return null;
+            // The colon must immediately follow the key (ignoring whitespace)
+            int afterKey = keyIdx + searchKey.length();
+            int colonIdx = -1;
+            for (int i = afterKey; i < json.length(); i++) {
+                char c = json.charAt(i);
+                if (c == ':') { colonIdx = i; break; }
+                if (!Character.isWhitespace(c)) break;
+            }
+            if (colonIdx < 0) {
+                searchFrom = afterKey;
+                continue;
+            }
 
             String rest = json.substring(colonIdx + 1).trim();
             if (rest.startsWith("null")) return null;
+
+            // Value must start with a digit or minus — if it starts with a quote,
+            // this is a string value, not a number.
+            if (rest.startsWith("\"")) return null;
 
             StringBuilder num = new StringBuilder();
             for (int i = 0; i < rest.length(); i++) {

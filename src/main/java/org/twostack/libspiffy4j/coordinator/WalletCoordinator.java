@@ -118,6 +118,10 @@ public final class WalletCoordinator {
                         onGetTransactions(readModelStorage, dataSource, cmd))
                 .onMessage(CoordinatorCommand.GetUtxos.class, cmd ->
                         onGetUtxos(readModelStorage, dataSource, cmd))
+                .onMessage(CoordinatorCommand.ConfigureUtxoPolicy.class, cmd ->
+                        onConfigureUtxoPolicy(readModelStorage, dataSource, cmd))
+                .onMessage(CoordinatorCommand.GetUtxoInventory.class, cmd ->
+                        onGetUtxoInventory(readModelStorage, dataSource, cmd))
                 .onMessage(CoordinatorCommand.CreateInvoice.class, cmd ->
                         onCreateInvoice(ctx, sharding, pendingCorrelations, cmd))
                 .onMessage(CoordinatorCommand.MarkInvoicePaid.class, cmd ->
@@ -131,6 +135,10 @@ public final class WalletCoordinator {
                         onBuildPluginPayment(ctx, sharding, pluginRegistry, readModelStorage,
                                 dataSource, transactionBuildService, arcService, signingActor,
                                 pendingCorrelations, cmd))
+                .onMessage(CoordinatorCommand.BuildPluginPaymentNoBroadcast.class, cmd ->
+                        onBuildPluginPaymentNoBroadcast(ctx, sharding, pluginRegistry, readModelStorage,
+                                dataSource, transactionBuildService, arcService, signingActor,
+                                pendingCorrelations, cmd))
                 .onMessage(CoordinatorCommand.BuildPluginProvisioning.class, cmd ->
                         onBuildPluginProvisioning(ctx, sharding, pluginRegistry, readModelStorage,
                                 dataSource, arcService, signingActor,
@@ -140,6 +148,8 @@ public final class WalletCoordinator {
                 .onMessage(CoordinatorCommand.RecordTransaction.class, cmd ->
                         onRecordTransaction(ctx, sharding, pluginRegistry, readModelStorage,
                                 dataSource, pendingCorrelations, cmd))
+                .onMessage(CoordinatorCommand.UpdateConfirmation.class, cmd ->
+                        onUpdateConfirmation(ctx, sharding, readModelStorage, dataSource, cmd))
                 .onMessage(CoordinatorCommand.WrappedWalletReply.class, cmd ->
                         onWrappedWalletReply(pendingCorrelations, cmd))
                 .onMessage(CoordinatorCommand.WrappedInvoiceReply.class, cmd ->
@@ -318,6 +328,40 @@ public final class WalletCoordinator {
         return Behaviors.same();
     }
 
+    // ── UTXO policy + inventory ──
+
+    private static Behavior<CoordinatorCommand> onConfigureUtxoPolicy(
+            WalletReadModelStorage storage, DataSource ds,
+            CoordinatorCommand.ConfigureUtxoPolicy cmd) {
+        try (var conn = ds.getConnection()) {
+            UtxoPolicy policy = new UtxoPolicy(
+                    cmd.targetLifecycleSteps(), cmd.lowThreshold(), cmd.autoProvisionEnabled());
+            storage.updateUtxoPolicy(conn, cmd.walletId(), policy);
+            cmd.replyTo().tell(new CoordinatorReply.CommandAccepted("UTXO policy configured"));
+        } catch (Exception e) {
+            cmd.replyTo().tell(new CoordinatorReply.Failure("Failed to configure UTXO policy: " + e.getMessage()));
+        }
+        return Behaviors.same();
+    }
+
+    private static Behavior<CoordinatorCommand> onGetUtxoInventory(
+            WalletReadModelStorage storage, DataSource ds,
+            CoordinatorCommand.GetUtxoInventory cmd) {
+        try {
+            Optional<WalletSummary> summaryOpt = storage.findWalletSummary(ds, cmd.walletId());
+            if (summaryOpt.isEmpty()) {
+                cmd.replyTo().tell(new CoordinatorReply.Failure("Wallet not found: " + cmd.walletId()));
+                return Behaviors.same();
+            }
+            UtxoPolicy policy = summaryOpt.get().utxoPolicy();
+            UtxoInventory inventory = storage.getUtxoInventory(ds, cmd.walletId(), policy);
+            cmd.replyTo().tell(new CoordinatorReply.UtxoInventoryResult(inventory));
+        } catch (Exception e) {
+            cmd.replyTo().tell(new CoordinatorReply.Failure("Failed to get UTXO inventory: " + e.getMessage()));
+        }
+        return Behaviors.same();
+    }
+
     // ── Invoice commands ──
 
     private static Behavior<CoordinatorCommand> onCreateInvoice(
@@ -402,6 +446,46 @@ public final class WalletCoordinator {
         return Behaviors.same();
     }
 
+    private static Behavior<CoordinatorCommand> onBuildPluginPaymentNoBroadcast(
+            ActorContext<CoordinatorCommand> ctx,
+            ClusterSharding sharding,
+            PluginRegistry pluginRegistry,
+            WalletReadModelStorage readModelStorage,
+            DataSource dataSource,
+            TransactionBuildService transactionBuildService,
+            ArcService arcService,
+            ActorRef<WalletSigningActor.SigningCommand> signingActor,
+            Map<String, PendingRequest> pending,
+            CoordinatorCommand.BuildPluginPaymentNoBroadcast cmd) {
+
+        CoordinatorReply result = PaymentCoordinator.buildPluginPaymentNoBroadcast(ctx, pluginRegistry,
+                readModelStorage, dataSource, transactionBuildService, arcService, signingActor, cmd);
+
+        if (result instanceof CoordinatorReply.Failure) {
+            cmd.replyTo().tell(result);
+            return Behaviors.same();
+        }
+
+        // Phase 2: record the transaction through the aggregate, reply when persisted
+        CoordinatorReply.PluginPaymentBuilt built = (CoordinatorReply.PluginPaymentBuilt) result;
+
+        String correlationId = UUID.randomUUID().toString();
+        pending.put(correlationId, new PendingRequest(cmd.replyTo(), "BuildPluginPaymentNoBroadcast", built));
+
+        ActorRef<WalletReply> adapter = spawnWalletReplyBridge(ctx, correlationId);
+        BitcoinTransaction btcTx = toBitcoinTransaction(cmd.walletId(), built.txid(), built.rawHex());
+
+        EntityRef<WalletCommand> walletRef =
+                sharding.entityRefFor(WalletAggregate.ENTITY_TYPE_KEY, cmd.walletId());
+        walletRef.tell(new WalletCommand.RecordTransactionCommand(cmd.walletId(), btcTx, adapter));
+
+        // Auto-record wallet-owned output UTXOs
+        PaymentCoordinator.autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
+                cmd.walletId(), built.txid(), built.rawHex(), null);
+
+        return Behaviors.same();
+    }
+
     private static Behavior<CoordinatorCommand> onBuildPluginProvisioning(
             ActorContext<CoordinatorCommand> ctx,
             ClusterSharding sharding,
@@ -445,9 +529,15 @@ public final class WalletCoordinator {
                     sharding.entityRefFor(WalletAggregate.ENTITY_TYPE_KEY, cmd.walletId());
             walletRef.tell(new WalletCommand.RecordTransactionCommand(cmd.walletId(), btcTx, adapter));
 
-            // Auto-record output UTXOs for each TX
-            PaymentCoordinator.autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
-                    cmd.walletId(), ptx.txid(), ptx.rawHex(), null);
+            // Auto-record output UTXOs — tag earmark TXs with purpose metadata
+            if (ptx.purpose() != null && ptx.fundingVout() >= 0) {
+                PaymentCoordinator.autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
+                        cmd.walletId(), ptx.txid(), ptx.rawHex(), null,
+                        ptx.purpose(), ptx.fundingVout());
+            } else {
+                PaymentCoordinator.autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
+                        cmd.walletId(), ptx.txid(), ptx.rawHex(), null);
+            }
         }
 
         return Behaviors.same();
@@ -508,6 +598,36 @@ public final class WalletCoordinator {
         PaymentCoordinator.autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
                 cmd.walletId(), cmd.transaction().txid(), cmd.transaction().rawHex(), null);
 
+        return Behaviors.same();
+    }
+
+    private static Behavior<CoordinatorCommand> onUpdateConfirmation(
+            ActorContext<CoordinatorCommand> ctx,
+            ClusterSharding sharding,
+            WalletReadModelStorage readModelStorage,
+            DataSource dataSource,
+            CoordinatorCommand.UpdateConfirmation cmd) {
+
+        LOG.info("Updating confirmation: walletId=" + cmd.walletId()
+                + " txid=" + cmd.txid() + " blockHeight=" + cmd.blockHeight()
+                + " confirmations=" + cmd.confirmations());
+
+        // Update read model directly for confirmation status
+        try (var conn = dataSource.getConnection()) {
+            readModelStorage.updateTransactionConfirmed(
+                    conn, cmd.walletId(), cmd.txid(),
+                    cmd.confirmations(), cmd.blockHeight(), java.time.Instant.now());
+            readModelStorage.updateUtxoConfirmations(
+                    conn, cmd.walletId(), cmd.txid(),
+                    cmd.confirmations(), cmd.blockHeight(), java.time.Instant.now());
+            if (cmd.merkleProofHex() != null) {
+                readModelStorage.storeMerkleProof(conn, cmd.txid(), cmd.merkleProofHex());
+            }
+        } catch (Exception e) {
+            LOG.warning("Failed to update confirmation for " + cmd.txid() + ": " + e.getMessage());
+        }
+
+        cmd.replyTo().tell(new CoordinatorReply.CommandAccepted("Confirmation updated"));
         return Behaviors.same();
     }
 

@@ -14,6 +14,8 @@ import org.twostack.libspiffy4j.plugin.*;
 import org.twostack.libspiffy4j.service.ArcService;
 import org.twostack.libspiffy4j.service.ArcServiceException;
 import org.twostack.libspiffy4j.service.TransactionBuildService;
+import org.twostack.libspiffy4j.spv.BeefBuilder;
+import org.twostack.libspiffy4j.spv.Bump;
 import org.twostack.libspiffy4j.storage.postgres.WalletReadModelStorage;
 
 import javax.sql.DataSource;
@@ -39,6 +41,23 @@ public final class PaymentCoordinator {
     private static final Logger LOG = Logger.getLogger(PaymentCoordinator.class.getName());
     private static final Duration SIGNING_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration RESERVATION_TTL = Duration.ofMinutes(5);
+
+    /**
+     * Approximate sats needed per provisioned lifecycle step (split output + earmark fee).
+     */
+    private static final long SATS_PER_LIFECYCLE_STEP = 18_000L;
+
+    /**
+     * Plugin ID used to tag funding earmark UTXOs in the read model.
+     * Distinguished from real plugin IDs (e.g., "tsl1-ft") which identify token scripts.
+     */
+    public static final String FUNDING_EARMARK_PLUGIN_ID = "funding-earmark";
+
+    /**
+     * Per-wallet concurrency guard — prevents overlapping auto-provision operations.
+     */
+    private static final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicBoolean>
+            provisioningInProgress = new java.util.concurrent.ConcurrentHashMap<>();
 
     private PaymentCoordinator() {}
 
@@ -150,8 +169,123 @@ public final class PaymentCoordinator {
             List<String> spentKeys = identifySpentInputs(result.rawHex(), reserved);
             finalizeUtxos(readModelStorage, dataSource, cmd.walletId(), reserved, spentKeys);
 
+            // Post-operation: check inventory and trigger auto-provision if needed
+            checkInventoryAndAutoProvision(ctx, readModelStorage, dataSource,
+                    cmd.walletId(), cmd.pluginId(), cmd.changeAddress());
+
+            String beefHex = buildBeefEnvelope(result.rawHex(), readModelStorage, dataSource, arcService);
+
             return new CoordinatorReply.PluginPaymentBuilt(
-                    result.txid(), result.rawHex(), result.feeSats());
+                    result.txid(), result.rawHex(), beefHex, result.feeSats());
+
+        } catch (Exception e) {
+            releaseUtxos(readModelStorage, dataSource, cmd.walletId(), reserved);
+            return new CoordinatorReply.Failure("Plugin payment failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Build a plugin payment transaction without broadcasting to ARC.
+     *
+     * <p>Identical to {@link #buildPluginPayment} except the ARC broadcast step
+     * is skipped. The caller is responsible for broadcasting the returned raw hex
+     * when appropriate (e.g., after mobile enrollment co-signing).
+     */
+    public static CoordinatorReply buildPluginPaymentNoBroadcast(
+            ActorContext<CoordinatorCommand> ctx,
+            PluginRegistry pluginRegistry,
+            WalletReadModelStorage readModelStorage,
+            DataSource dataSource,
+            TransactionBuildService transactionBuildService,
+            ArcService arcService,
+            ActorRef<WalletSigningActor.SigningCommand> signingActor,
+            CoordinatorCommand.BuildPluginPaymentNoBroadcast cmd) {
+
+        List<BitcoinUtxo> reserved = List.of();
+        try {
+            Optional<TransactionBuilderPlugin> pluginOpt =
+                    pluginRegistry.getTransactionBuilderPlugin(cmd.pluginId());
+            if (pluginOpt.isEmpty()) {
+                return new CoordinatorReply.Failure("Plugin not found: " + cmd.pluginId());
+            }
+            TransactionBuilderPlugin plugin = pluginOpt.get();
+
+            if (!plugin.supportedActions().contains(cmd.action())) {
+                return new CoordinatorReply.Failure(
+                        "Unsupported action '%s' for plugin '%s'".formatted(cmd.action(), cmd.pluginId()));
+            }
+
+            List<BitcoinUtxo> available = readModelStorage.findUtxosByStatus(
+                    dataSource, cmd.walletId(), UtxoStatus.AVAILABLE);
+            if (available.isEmpty()) {
+                return new CoordinatorReply.Failure("No available UTXOs");
+            }
+
+            reserved = available;
+            reserveUtxos(readModelStorage, dataSource, cmd.walletId(), reserved, "pending-build");
+
+            Optional<WalletSummary> summaryOpt = readModelStorage.findWalletSummary(dataSource, cmd.walletId());
+            if (summaryOpt.isEmpty()) {
+                releaseUtxos(readModelStorage, dataSource, cmd.walletId(), reserved);
+                return new CoordinatorReply.Failure("Wallet not found: " + cmd.walletId());
+            }
+            NetworkType networkType = summaryOpt.get().networkType();
+
+            Map<String, Integer> addressToIndex = readModelStorage.findAddressIndexMap(dataSource, cmd.walletId());
+
+            WalletSigningActor.SigningReply signingReply =
+                    org.apache.pekko.actor.typed.javadsl.AskPattern.<WalletSigningActor.SigningCommand, WalletSigningActor.SigningReply>ask(
+                            signingActor,
+                            replyTo -> new WalletSigningActor.PrepareSigner(
+                                    cmd.walletId(), available, addressToIndex, networkType, replyTo),
+                            SIGNING_TIMEOUT, ctx.getSystem().scheduler()
+                    ).toCompletableFuture().get(SIGNING_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
+
+            if (signingReply instanceof WalletSigningActor.SigningFailure failure) {
+                releaseUtxos(readModelStorage, dataSource, cmd.walletId(), reserved);
+                return new CoordinatorReply.Failure(failure.reason());
+            }
+
+            WalletSigningActor.SignerReady ready = (WalletSigningActor.SignerReady) signingReply;
+            LOG.info("Signer ready for wallet " + cmd.walletId()
+                    + " — pubKeys=" + ready.publicKeyHexes());
+
+            TransactionLookup transactionLookup = txid -> {
+                try {
+                    return readModelStorage.findRawHexByTxid(dataSource, txid).orElse(null);
+                } catch (Exception e) {
+                    LOG.log(Level.WARNING, "Failed to look up transaction: " + txid, e);
+                    return null;
+                }
+            };
+
+            PluginTransactionRequest request = new PluginTransactionRequest(
+                    available, ready.signer(), transactionLookup,
+                    ready.publicKeyHexes(), cmd.changeAddress(), cmd.pluginParams());
+
+            LOG.info("Invoking plugin " + cmd.pluginId() + " action=" + cmd.action());
+            TransactionBuilderResult result = plugin.buildTransaction(request);
+            LOG.info("Plugin returned txid=" + result.txid() + " rawHex length=" + result.rawHex().length());
+
+            byte[] rawTx = Utils.HEX.decode(result.rawHex());
+            if (!plugin.validateTransactionStructure(rawTx, cmd.action())) {
+                releaseUtxos(readModelStorage, dataSource, cmd.walletId(), reserved);
+                return new CoordinatorReply.Failure("Plugin transaction failed structure validation");
+            }
+
+            // No ARC broadcast — caller is responsible for broadcasting
+
+            List<String> spentKeys = identifySpentInputs(result.rawHex(), reserved);
+            finalizeUtxos(readModelStorage, dataSource, cmd.walletId(), reserved, spentKeys);
+
+            // Post-operation: check inventory and trigger auto-provision if needed
+            checkInventoryAndAutoProvision(ctx, readModelStorage, dataSource,
+                    cmd.walletId(), cmd.pluginId(), cmd.changeAddress());
+
+            String beefHex = buildBeefEnvelope(result.rawHex(), readModelStorage, dataSource, arcService);
+
+            return new CoordinatorReply.PluginPaymentBuilt(
+                    result.txid(), result.rawHex(), beefHex, result.feeSats());
 
         } catch (Exception e) {
             releaseUtxos(readModelStorage, dataSource, cmd.walletId(), reserved);
@@ -528,6 +662,96 @@ public final class PaymentCoordinator {
                 walletId, utxo, ctx.getSystem().ignoreRef()));
     }
 
+    /**
+     * Earmark-aware variant: tags the output at {@code fundingVout} with earmark metadata.
+     * All other outputs are recorded as plain wallet UTXOs.
+     */
+    static void autoRecordOutputUtxos(
+            ActorContext<CoordinatorCommand> ctx,
+            PluginRegistry pluginRegistry,
+            WalletReadModelStorage readModelStorage,
+            DataSource dataSource,
+            String walletId, String txid, String rawHex,
+            Map<String, Integer> addressToIndex,
+            String earmarkPurpose, int fundingVout) {
+
+        if (rawHex == null || rawHex.isBlank()) return;
+
+        try {
+            Transaction tx = Transaction.fromHex(rawHex);
+            List<TransactionOutput> outputs = tx.getOutputs();
+
+            Optional<WalletSummary> summaryOpt = readModelStorage.findWalletSummary(dataSource, walletId);
+            if (summaryOpt.isEmpty()) return;
+            NetworkAddressType addrType = toNetworkAddressType(summaryOpt.get().networkType());
+
+            Set<String> walletAddresses = new HashSet<>(
+                    readModelStorage.findAddressesByWalletId(dataSource, walletId));
+
+            for (int vout = 0; vout < outputs.size(); vout++) {
+                TransactionOutput output = outputs.get(vout);
+                Script script = output.getScript();
+                byte[] scriptBytes = script.getProgram();
+                String scriptHex = Utils.HEX.encode(scriptBytes);
+
+                String address = deriveStandardAddress(script, addrType);
+
+                if (address != null && walletAddresses.contains(address)) {
+                    Integer derivIdx = addressToIndex != null ? addressToIndex.get(address) : null;
+                    String purpose = (vout == fundingVout) ? earmarkPurpose : null;
+                    recordUtxo(ctx, walletId, txid, vout, output, scriptHex, address, derivIdx, purpose);
+                    continue;
+                }
+
+                if (pluginRegistry.hasPlugins()) {
+                    Optional<PluginRegistry.PluginIdentification> identification =
+                            pluginRegistry.identifyScript(scriptBytes);
+                    if (identification.isPresent()) {
+                        ScriptPlugin plugin = pluginRegistry.getPlugin(
+                                identification.get().pluginId()).orElse(null);
+                        if (plugin != null) {
+                            Map<String, Object> metadata = plugin.extractMetadata(scriptBytes);
+                            String ownerAddress = metadata != null
+                                    ? (String) metadata.get("ownerAddress") : null;
+                            if (ownerAddress != null && walletAddresses.contains(ownerAddress)) {
+                                Integer derivIdx = addressToIndex != null ? addressToIndex.get(ownerAddress) : null;
+                                recordUtxo(ctx, walletId, txid, vout, output, scriptHex, ownerAddress, derivIdx, null);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Failed to auto-record output UTXOs for tx " + txid, e);
+        }
+    }
+
+    private static void recordUtxo(
+            ActorContext<CoordinatorCommand> ctx,
+            String walletId, String txid, int vout,
+            TransactionOutput output, String scriptHex, String address,
+            Integer derivationIndex, String earmarkPurpose) {
+
+        String pluginId = null;
+        Map<String, Object> pluginMetadata = null;
+        if (earmarkPurpose != null) {
+            pluginId = FUNDING_EARMARK_PLUGIN_ID;
+            pluginMetadata = Map.of("purpose", earmarkPurpose);
+        }
+
+        Instant now = Instant.now();
+        BitcoinUtxo utxo = new BitcoinUtxo(
+                txid, vout, output.getAmount().longValue(), scriptHex,
+                address, UtxoStatus.AVAILABLE,
+                null, null, now, now,
+                null, null, null, null,
+                derivationIndex,
+                pluginId, pluginMetadata
+        );
+        ctx.getSelf().tell(new CoordinatorCommand.RecordUtxo(
+                walletId, utxo, ctx.getSystem().ignoreRef()));
+    }
+
     static String deriveStandardAddress(Script script, NetworkAddressType addrType) {
         try {
             if (ScriptPattern.isP2PKH(script)) {
@@ -545,5 +769,161 @@ public final class PaymentCoordinator {
             case MAINNET -> NetworkAddressType.MAIN_PKH;
             case TESTNET, REGTEST -> NetworkAddressType.TEST_PKH;
         };
+    }
+
+    // ── Auto-provisioning ──
+
+    /**
+     * Check post-operation UTXO inventory against policy and trigger auto-provisioning
+     * if inventory is below the low threshold. Fire-and-forget — does not block the
+     * current operation's reply.
+     */
+    static void checkInventoryAndAutoProvision(
+            ActorContext<CoordinatorCommand> ctx,
+            WalletReadModelStorage readModelStorage,
+            DataSource dataSource,
+            String walletId, String pluginId, String changeAddress) {
+
+        try {
+            Optional<WalletSummary> summaryOpt = readModelStorage.findWalletSummary(dataSource, walletId);
+            if (summaryOpt.isEmpty()) return;
+
+            WalletSummary summary = summaryOpt.get();
+            UtxoPolicy policy = summary.utxoPolicy();
+            if (!policy.autoProvisionEnabled()) return;
+
+            UtxoInventory inventory = readModelStorage.getUtxoInventory(dataSource, walletId, policy);
+            LOG.info("Post-operation inventory for wallet " + walletId
+                    + ": available=" + inventory.availableCount()
+                    + " lifecycleSteps=" + inventory.lifecycleSteps()
+                    + " (iw=" + inventory.issuanceWitnessCount()
+                    + " xfer=" + inventory.transferCount()
+                    + " xw=" + inventory.transferWitnessCount() + ")"
+                    + " status=" + inventory.policyStatus());
+
+            if (inventory.policyStatus() == UtxoInventory.PolicyStatus.SUFFICIENT) return;
+
+            // Check concurrency guard — skip if another provisioning is in flight
+            var guard = provisioningInProgress.computeIfAbsent(walletId,
+                    k -> new java.util.concurrent.atomic.AtomicBoolean(false));
+            if (!guard.compareAndSet(false, true)) {
+                LOG.info("Skipping auto-provision for wallet " + walletId + " — already in progress");
+                return;
+            }
+
+            // Check if balance is sufficient for provisioning
+            int stepsNeeded = policy.targetLifecycleSteps() - inventory.lifecycleSteps();
+            if (stepsNeeded <= 0) {
+                guard.set(false);
+                return;
+            }
+
+            long satsNeeded = stepsNeeded * SATS_PER_LIFECYCLE_STEP;
+            long availableSats = inventory.availableSats();
+
+            if (availableSats < satsNeeded) {
+                guard.set(false);
+                LOG.warning("Wallet " + walletId + " needs funding: available="
+                        + availableSats + " sats, need=" + satsNeeded + " sats for " + stepsNeeded + " steps");
+                // Emit WalletFundingNeeded via a self-tell to the coordinator
+                // The coordinator ignores the reply; the host app can listen for this event type
+                // by querying inventory status.
+                return;
+            }
+
+            // Fire-and-forget: self-tell a BuildPluginProvisioning command
+            LOG.info("Auto-provisioning " + stepsNeeded + " lifecycle steps for wallet " + walletId);
+
+            Map<String, Object> provisionParams = new HashMap<>();
+            provisionParams.put("lifecycleSteps", stepsNeeded);
+
+            ctx.getSelf().tell(new CoordinatorCommand.BuildPluginProvisioning(
+                    walletId, pluginId, provisionParams, changeAddress,
+                    ctx.spawnAnonymous(org.apache.pekko.actor.typed.javadsl.Behaviors.receiveMessage(reply -> {
+                        guard.set(false);
+                        if (reply instanceof CoordinatorReply.Failure failure) {
+                            LOG.warning("Auto-provisioning failed for wallet " + walletId + ": " + failure.reason());
+                        } else {
+                            LOG.info("Auto-provisioning completed for wallet " + walletId);
+                        }
+                        return org.apache.pekko.actor.typed.javadsl.Behaviors.stopped();
+                    }))));
+
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Post-operation inventory check failed for wallet " + walletId, e);
+            provisioningInProgress.computeIfPresent(walletId, (k, v) -> { v.set(false); return v; });
+        }
+    }
+
+    /**
+     * Construct a BEEF envelope for a built transaction.
+     *
+     * Parses the tip TX to find its input txids, looks up each ancestor's
+     * raw bytes from the read model, fetches merkle proofs from ARC,
+     * and assembles the BEEF with proven ancestors + unproven tip.
+     *
+     * @return hex-encoded BEEF, or null if construction fails
+     */
+    private static String buildBeefEnvelope(String tipRawHex,
+                                             WalletReadModelStorage readModelStorage,
+                                             DataSource dataSource,
+                                             ArcService arcService) {
+        try {
+            Transaction tipTx = Transaction.fromHex(tipRawHex);
+            byte[] tipRawBytes = Utils.HEX.decode(tipRawHex);
+            BeefBuilder builder = new BeefBuilder();
+
+            // Collect unique input txids
+            Set<String> inputTxIds = new LinkedHashSet<>();
+            for (var input : tipTx.getInputs()) {
+                inputTxIds.add(Utils.HEX.encode(Utils.reverseBytes(input.getPrevTxnId())));
+            }
+
+            // For each input, get raw bytes + merkle proof
+            for (String inputTxId : inputTxIds) {
+                Optional<String> inputRawHex = readModelStorage.findRawHexByTxid(dataSource, inputTxId);
+                if (inputRawHex.isEmpty()) {
+                    LOG.warning("BEEF: ancestor TX " + inputTxId + " not found in wallet storage");
+                    return null;
+                }
+
+                byte[] inputRawBytes = Utils.HEX.decode(inputRawHex.get());
+
+                // Try cached merkle proof first, fall back to ARC
+                Bump bump = null;
+                try {
+                    Optional<String> cachedProof = readModelStorage.findMerkleProofByTxid(dataSource, inputTxId);
+                    if (cachedProof.isPresent()) {
+                        bump = Bump.parse(Utils.HEX.decode(cachedProof.get()));
+                    }
+                } catch (Exception e) {
+                    LOG.fine("Cached proof lookup failed for " + inputTxId + ": " + e.getMessage());
+                }
+
+                if (bump == null) {
+                    try {
+                        MerkleProofData proofData = arcService.getMerkleProof(inputTxId);
+                        bump = proofData.bump();
+                    } catch (Exception e) {
+                        LOG.warning("BEEF: merkle proof not available for ancestor TX " + inputTxId
+                                + " — " + e.getMessage());
+                        return null;
+                    }
+                }
+
+                builder.addProvenTransaction(inputRawBytes, bump);
+            }
+
+            // Add the tip transaction as unproven
+            builder.addUnprovenTransaction(tipRawBytes);
+
+            byte[] beefBytes = builder.build().serialize();
+            LOG.info("BEEF constructed: " + beefBytes.length + " bytes, "
+                    + inputTxIds.size() + " proven ancestors");
+            return Utils.HEX.encode(beefBytes);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "BEEF construction failed", e);
+            return null;
+        }
     }
 }

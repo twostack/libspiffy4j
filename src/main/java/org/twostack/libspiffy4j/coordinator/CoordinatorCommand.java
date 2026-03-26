@@ -19,13 +19,17 @@ public sealed interface CoordinatorCommand permits
         CoordinatorCommand.GetBalance,
         CoordinatorCommand.GetTransactions,
         CoordinatorCommand.GetUtxos,
+        CoordinatorCommand.ConfigureUtxoPolicy,
+        CoordinatorCommand.GetUtxoInventory,
         CoordinatorCommand.CreateInvoice,
         CoordinatorCommand.MarkInvoicePaid,
         CoordinatorCommand.BuildPayment,
         CoordinatorCommand.BuildPluginPayment,
+        CoordinatorCommand.BuildPluginPaymentNoBroadcast,
         CoordinatorCommand.BuildPluginProvisioning,
         CoordinatorCommand.RecordUtxo,
         CoordinatorCommand.RecordTransaction,
+        CoordinatorCommand.UpdateConfirmation,
         CoordinatorCommand.WrappedWalletReply,
         CoordinatorCommand.WrappedInvoiceReply {
 
@@ -69,6 +73,25 @@ public sealed interface CoordinatorCommand permits
             ActorRef<CoordinatorReply> replyTo
     ) implements CoordinatorCommand {}
 
+    /**
+     * Configure the UTXO provisioning policy for a wallet.
+     */
+    record ConfigureUtxoPolicy(
+            String walletId,
+            int targetLifecycleSteps,
+            int lowThreshold,
+            boolean autoProvisionEnabled,
+            ActorRef<CoordinatorReply> replyTo
+    ) implements CoordinatorCommand {}
+
+    /**
+     * Query the current UTXO inventory and policy status for a wallet.
+     */
+    record GetUtxoInventory(
+            String walletId,
+            ActorRef<CoordinatorReply> replyTo
+    ) implements CoordinatorCommand {}
+
     // ── Invoice commands ──
 
     record CreateInvoice(
@@ -94,6 +117,13 @@ public sealed interface CoordinatorCommand permits
     ) implements CoordinatorCommand {}
 
     record BuildPluginPayment(
+            String walletId, String pluginId, String action,
+            Map<String, Object> pluginParams,
+            TransactionBuildConfig config, String changeAddress,
+            ActorRef<CoordinatorReply> replyTo
+    ) implements CoordinatorCommand {}
+
+    record BuildPluginPaymentNoBroadcast(
             String walletId, String pluginId, String action,
             Map<String, Object> pluginParams,
             TransactionBuildConfig config, String changeAddress,
@@ -126,6 +156,17 @@ public sealed interface CoordinatorCommand permits
 
     record RecordTransaction(
             String walletId, BitcoinTransaction transaction,
+            ActorRef<CoordinatorReply> replyTo
+    ) implements CoordinatorCommand {}
+
+    /**
+     * Update a transaction's confirmation status. Sent when ARC reports a
+     * previously-broadcast transaction has been mined into a block.
+     */
+    record UpdateConfirmation(
+            String walletId, String txid,
+            int confirmations, Integer blockHeight,
+            String merkleProofHex,
             ActorRef<CoordinatorReply> replyTo
     ) implements CoordinatorCommand {}
 
