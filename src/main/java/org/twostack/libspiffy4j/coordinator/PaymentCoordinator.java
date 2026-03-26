@@ -156,9 +156,17 @@ public final class PaymentCoordinator {
                 return new CoordinatorReply.Failure("Plugin transaction failed structure validation");
             }
 
+            // Build BEEF before broadcast — includes unbroadcast ancestors
+            String beefHex = buildBeefEnvelope(result.rawHex(), readModelStorage, dataSource, arcService);
+
             try {
-                arcService.submitTransaction(result.rawHex());
-                LOG.info("Broadcast successful for tx " + result.txid());
+                if (beefHex != null) {
+                    arcService.submitBeef(beefHex);
+                    LOG.info("Broadcast successful (BEEF) for tx " + result.txid());
+                } else {
+                    arcService.submitTransaction(result.rawHex());
+                    LOG.info("Broadcast successful (raw) for tx " + result.txid());
+                }
             } catch (ArcServiceException e) {
                 LOG.log(Level.WARNING, "Broadcast failed for tx " + result.txid()
                         + " — ARC status " + e.httpStatusCode() + ": " + e.responseBody(), e);
@@ -172,8 +180,6 @@ public final class PaymentCoordinator {
             // Post-operation: check inventory and trigger auto-provision if needed
             checkInventoryAndAutoProvision(ctx, readModelStorage, dataSource,
                     cmd.walletId(), cmd.pluginId(), cmd.changeAddress());
-
-            String beefHex = buildBeefEnvelope(result.rawHex(), readModelStorage, dataSource, arcService);
 
             return new CoordinatorReply.PluginPaymentBuilt(
                     result.txid(), result.rawHex(), beefHex, result.feeSats());
@@ -858,72 +864,110 @@ public final class PaymentCoordinator {
     /**
      * Construct a BEEF envelope for a built transaction.
      *
-     * Parses the tip TX to find its input txids, looks up each ancestor's
-     * raw bytes from the read model, fetches merkle proofs from ARC,
-     * and assembles the BEEF with proven ancestors + unproven tip.
+     * <p>Walks the ancestor chain: for each parent TX, if a merkle proof is
+     * available it's added as proven. If not (e.g., the parent was never broadcast),
+     * it's added as unproven and its own parents are recursively included until
+     * proven roots are found. This handles the case where a token TX references
+     * an unbroadcast enrollment TX whose parent (the issuance TX) is mined.
      *
      * @return hex-encoded BEEF, or null if construction fails
      */
-    private static String buildBeefEnvelope(String tipRawHex,
+    static String buildBeefEnvelope(String tipRawHex,
                                              WalletReadModelStorage readModelStorage,
                                              DataSource dataSource,
                                              ArcService arcService) {
         try {
-            Transaction tipTx = Transaction.fromHex(tipRawHex);
             byte[] tipRawBytes = Utils.HEX.decode(tipRawHex);
             BeefBuilder builder = new BeefBuilder();
+            Set<String> visited = new HashSet<>();
 
-            // Collect unique input txids
-            Set<String> inputTxIds = new LinkedHashSet<>();
-            for (var input : tipTx.getInputs()) {
-                inputTxIds.add(Utils.HEX.encode(Utils.reverseBytes(input.getPrevTxnId())));
-            }
-
-            // For each input, get raw bytes + merkle proof
-            for (String inputTxId : inputTxIds) {
-                Optional<String> inputRawHex = readModelStorage.findRawHexByTxid(dataSource, inputTxId);
-                if (inputRawHex.isEmpty()) {
-                    LOG.warning("BEEF: ancestor TX " + inputTxId + " not found in wallet storage");
+            // Recursively add ancestors
+            Transaction tipTx = Transaction.fromHex(tipRawHex);
+            Set<String> tipInputTxIds = extractInputTxIds(tipTx);
+            for (String inputTxId : tipInputTxIds) {
+                if (!addAncestor(inputTxId, builder, readModelStorage, dataSource, arcService, visited)) {
                     return null;
                 }
-
-                byte[] inputRawBytes = Utils.HEX.decode(inputRawHex.get());
-
-                // Try cached merkle proof first, fall back to ARC
-                Bump bump = null;
-                try {
-                    Optional<String> cachedProof = readModelStorage.findMerkleProofByTxid(dataSource, inputTxId);
-                    if (cachedProof.isPresent()) {
-                        bump = Bump.parse(Utils.HEX.decode(cachedProof.get()));
-                    }
-                } catch (Exception e) {
-                    LOG.fine("Cached proof lookup failed for " + inputTxId + ": " + e.getMessage());
-                }
-
-                if (bump == null) {
-                    try {
-                        MerkleProofData proofData = arcService.getMerkleProof(inputTxId);
-                        bump = proofData.bump();
-                    } catch (Exception e) {
-                        LOG.warning("BEEF: merkle proof not available for ancestor TX " + inputTxId
-                                + " — " + e.getMessage());
-                        return null;
-                    }
-                }
-
-                builder.addProvenTransaction(inputRawBytes, bump);
             }
 
-            // Add the tip transaction as unproven
             builder.addUnprovenTransaction(tipRawBytes);
 
             byte[] beefBytes = builder.build().serialize();
             LOG.info("BEEF constructed: " + beefBytes.length + " bytes, "
-                    + inputTxIds.size() + " proven ancestors");
+                    + visited.size() + " ancestors (" + tipInputTxIds.size() + " direct)");
             return Utils.HEX.encode(beefBytes);
         } catch (Exception e) {
             LOG.log(Level.WARNING, "BEEF construction failed", e);
             return null;
         }
+    }
+
+    /**
+     * Add an ancestor TX to the BEEF. If it has a merkle proof, add as proven.
+     * If not, add as unproven and recurse to its own parents.
+     */
+    private static boolean addAncestor(String txid, BeefBuilder builder,
+                                        WalletReadModelStorage readModelStorage,
+                                        DataSource dataSource, ArcService arcService,
+                                        Set<String> visited) {
+        if (!visited.add(txid)) return true; // already processed
+
+        Optional<String> rawHexOpt;
+        try {
+            rawHexOpt = readModelStorage.findRawHexByTxid(dataSource, txid);
+        } catch (Exception e) {
+            LOG.warning("BEEF: failed to look up ancestor TX " + txid + ": " + e.getMessage());
+            return false;
+        }
+
+        if (rawHexOpt.isEmpty()) {
+            LOG.warning("BEEF: ancestor TX " + txid + " not found in wallet storage");
+            return false;
+        }
+
+        byte[] rawBytes = Utils.HEX.decode(rawHexOpt.get());
+
+        // Try to get merkle proof (cached, then ARC)
+        Bump bump = null;
+        try {
+            Optional<String> cachedProof = readModelStorage.findMerkleProofByTxid(dataSource, txid);
+            if (cachedProof.isPresent()) {
+                bump = Bump.parse(Utils.HEX.decode(cachedProof.get()));
+            }
+        } catch (Exception e) {
+            LOG.fine("Cached proof lookup failed for " + txid + ": " + e.getMessage());
+        }
+
+        if (bump == null) {
+            try {
+                MerkleProofData proofData = arcService.getMerkleProof(txid);
+                bump = proofData.bump();
+            } catch (Exception e) {
+                // No proof available — this ancestor is unproven (e.g., never broadcast)
+                LOG.fine("No merkle proof for ancestor " + txid + " — adding as unproven");
+            }
+        }
+
+        if (bump != null) {
+            builder.addProvenTransaction(rawBytes, bump);
+        } else {
+            // Unproven ancestor: add it and recurse to its parents
+            builder.addUnprovenTransaction(rawBytes);
+            Transaction ancestorTx = Transaction.fromHex(rawHexOpt.get());
+            for (String parentTxId : extractInputTxIds(ancestorTx)) {
+                if (!addAncestor(parentTxId, builder, readModelStorage, dataSource, arcService, visited)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private static Set<String> extractInputTxIds(Transaction tx) {
+        Set<String> txIds = new LinkedHashSet<>();
+        for (var input : tx.getInputs()) {
+            txIds.add(Utils.HEX.encode(Utils.reverseBytes(input.getPrevTxnId())));
+        }
+        return txIds;
     }
 }

@@ -73,6 +73,38 @@ public class ArcService {
     }
 
     /**
+     * Submits a BEEF-encoded transaction to ARC. ARC auto-detects the BEEF
+     * format from the {@code 0100BEEF} magic bytes in the hex data.
+     */
+    public ArcSubmitResponse submitBeef(String beefHex) {
+        try {
+            var builder = HttpRequest.newBuilder()
+                    .uri(URI.create(config.baseUrl() + "/v1/tx"))
+                    .header("Content-Type", "text/plain")
+                    .POST(HttpRequest.BodyPublishers.ofString(beefHex));
+
+            addAuthHeader(builder);
+            if (config.defaultCallbackUrl() != null && !config.defaultCallbackUrl().isBlank()) {
+                builder.header("X-CallbackUrl", config.defaultCallbackUrl());
+            }
+
+            HttpResponse<String> response = httpClient.send(builder.build(),
+                    HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() >= 400) {
+                throw new ArcServiceException("ARC BEEF submit failed with status " + response.statusCode(),
+                        response.statusCode(), response.body());
+            }
+
+            return parseSubmitResponse(response.body());
+        } catch (ArcServiceException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new ArcServiceException("Failed to submit BEEF transaction", e);
+        }
+    }
+
+    /**
      * Queries the status of a transaction by txid.
      */
     public ArcTransactionResponse queryTransaction(String txid) {
