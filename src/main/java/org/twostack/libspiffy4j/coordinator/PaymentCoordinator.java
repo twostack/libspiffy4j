@@ -185,7 +185,25 @@ public final class PaymentCoordinator {
                 return new CoordinatorReply.Failure("ARC broadcast failed: " + e.getMessage());
             }
 
+            // Broadcast paired witness TX if present (same UTXO reservation)
+            if (result.hasPairedWitness()) {
+                LOG.info("Broadcasting paired witness TX " + result.witnessTxid()
+                        + " rawHex length=" + result.witnessRawHex().length());
+                try {
+                    arcService.submitTransaction(result.witnessRawHex());
+                } catch (ArcServiceException we) {
+                    LOG.log(Level.WARNING, "Witness broadcast failed for tx " + result.witnessTxid()
+                            + " — ARC status " + we.httpStatusCode() + ": " + we.responseBody(), we);
+                    releaseUtxos(readModelStorage, dataSource, cmd.walletId(), reserved);
+                    return new CoordinatorReply.Failure(
+                            "Witness TX broadcast failed: " + we.getMessage());
+                }
+            }
+
             List<String> spentKeys = identifySpentInputs(result.rawHex(), reserved);
+            if (result.hasPairedWitness()) {
+                spentKeys.addAll(identifySpentInputs(result.witnessRawHex(), reserved));
+            }
             finalizeUtxos(readModelStorage, dataSource, cmd.walletId(), reserved, spentKeys);
 
             // Post-operation: check inventory and trigger auto-provision if needed
@@ -193,7 +211,8 @@ public final class PaymentCoordinator {
                     cmd.walletId(), cmd.pluginId(), cmd.changeAddress());
 
             return new CoordinatorReply.PluginPaymentBuilt(
-                    result.txid(), result.rawHex(), beefHex, result.feeSats());
+                    result.txid(), result.rawHex(), beefHex, result.feeSats(),
+                    result.witnessTxid(), result.witnessRawHex());
 
         } catch (Exception e) {
             releaseUtxos(readModelStorage, dataSource, cmd.walletId(), reserved);
@@ -302,7 +321,8 @@ public final class PaymentCoordinator {
             String beefHex = buildBeefEnvelope(result.rawHex(), readModelStorage, dataSource, arcService);
 
             return new CoordinatorReply.PluginPaymentBuilt(
-                    result.txid(), result.rawHex(), beefHex, result.feeSats());
+                    result.txid(), result.rawHex(), beefHex, result.feeSats(),
+                    result.witnessTxid(), result.witnessRawHex());
 
         } catch (Exception e) {
             releaseUtxos(readModelStorage, dataSource, cmd.walletId(), reserved);

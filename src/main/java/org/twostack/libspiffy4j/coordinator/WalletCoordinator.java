@@ -489,6 +489,18 @@ public final class WalletCoordinator {
         PaymentCoordinator.autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
                 cmd.walletId(), built.txid(), built.rawHex(), null);
 
+        // Record paired witness TX if present
+        if (built.witnessTxid() != null && built.witnessRawHex() != null) {
+            BitcoinTransaction witnessBtcTx = toBitcoinTransaction(
+                    cmd.walletId(), built.witnessTxid(), built.witnessRawHex());
+            ActorRef<WalletReply> witnessAdapter = spawnWalletReplyBridge(ctx,
+                    UUID.randomUUID().toString());
+            walletRef.tell(new WalletCommand.RecordTransactionCommand(
+                    cmd.walletId(), witnessBtcTx, witnessAdapter));
+            PaymentCoordinator.autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage,
+                    dataSource, cmd.walletId(), built.witnessTxid(), built.witnessRawHex(), null);
+        }
+
         return Behaviors.same();
     }
 
