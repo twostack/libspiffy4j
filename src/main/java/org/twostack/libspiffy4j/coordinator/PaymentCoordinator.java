@@ -16,6 +16,8 @@ import org.twostack.libspiffy4j.service.ArcServiceException;
 import org.twostack.libspiffy4j.service.TransactionBuildService;
 import org.twostack.libspiffy4j.spv.BeefBuilder;
 import org.twostack.libspiffy4j.spv.Bump;
+import org.twostack.libspiffy4j.aggregate.wallet.WalletCommand;
+import org.twostack.libspiffy4j.aggregate.wallet.WalletReply;
 import org.twostack.libspiffy4j.storage.postgres.WalletReadModelStorage;
 
 import javax.sql.DataSource;
@@ -82,6 +84,7 @@ public final class PaymentCoordinator {
             TransactionBuildService transactionBuildService,
             ArcService arcService,
             ActorRef<WalletSigningActor.SigningCommand> signingActor,
+            org.apache.pekko.cluster.sharding.typed.javadsl.ClusterSharding sharding,
             CoordinatorCommand.BuildPluginPayment cmd) {
 
         List<BitcoinUtxo> reserved = List.of();
@@ -114,13 +117,14 @@ public final class PaymentCoordinator {
             }
             NetworkType networkType = summaryOpt.get().networkType();
 
-            Map<String, Integer> addressToIndex = readModelStorage.findAddressIndexMap(dataSource, cmd.walletId());
+            Map<String, Integer> addressToIndex = queryAddressIndices(sharding, cmd.walletId(), ctx);
 
             WalletSigningActor.SigningReply signingReply =
                     org.apache.pekko.actor.typed.javadsl.AskPattern.<WalletSigningActor.SigningCommand, WalletSigningActor.SigningReply>ask(
                             signingActor,
                             replyTo -> new WalletSigningActor.PrepareSigner(
-                                    cmd.walletId(), available, addressToIndex, networkType, replyTo),
+                                    cmd.walletId(), available, addressToIndex, networkType,
+                                    buildScriptResolver(pluginRegistry, networkType), replyTo),
                             SIGNING_TIMEOUT, ctx.getSystem().scheduler()
                     ).toCompletableFuture().get(SIGNING_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
 
@@ -235,6 +239,7 @@ public final class PaymentCoordinator {
             TransactionBuildService transactionBuildService,
             ArcService arcService,
             ActorRef<WalletSigningActor.SigningCommand> signingActor,
+            org.apache.pekko.cluster.sharding.typed.javadsl.ClusterSharding sharding,
             CoordinatorCommand.BuildPluginPaymentNoBroadcast cmd) {
 
         List<BitcoinUtxo> reserved = List.of();
@@ -267,13 +272,14 @@ public final class PaymentCoordinator {
             }
             NetworkType networkType = summaryOpt.get().networkType();
 
-            Map<String, Integer> addressToIndex = readModelStorage.findAddressIndexMap(dataSource, cmd.walletId());
+            Map<String, Integer> addressToIndex = queryAddressIndices(sharding, cmd.walletId(), ctx);
 
             WalletSigningActor.SigningReply signingReply =
                     org.apache.pekko.actor.typed.javadsl.AskPattern.<WalletSigningActor.SigningCommand, WalletSigningActor.SigningReply>ask(
                             signingActor,
                             replyTo -> new WalletSigningActor.PrepareSigner(
-                                    cmd.walletId(), available, addressToIndex, networkType, replyTo),
+                                    cmd.walletId(), available, addressToIndex, networkType,
+                                    buildScriptResolver(pluginRegistry, networkType), replyTo),
                             SIGNING_TIMEOUT, ctx.getSystem().scheduler()
                     ).toCompletableFuture().get(SIGNING_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
 
@@ -344,6 +350,7 @@ public final class PaymentCoordinator {
             DataSource dataSource,
             ArcService arcService,
             ActorRef<WalletSigningActor.SigningCommand> signingActor,
+            org.apache.pekko.cluster.sharding.typed.javadsl.ClusterSharding sharding,
             CoordinatorCommand.BuildPluginProvisioning cmd) {
 
         List<BitcoinUtxo> reserved = List.of();
@@ -371,13 +378,14 @@ public final class PaymentCoordinator {
             }
             NetworkType networkType = summaryOpt.get().networkType();
 
-            Map<String, Integer> addressToIndex = readModelStorage.findAddressIndexMap(dataSource, cmd.walletId());
+            Map<String, Integer> addressToIndex = queryAddressIndices(sharding, cmd.walletId(), ctx);
 
             WalletSigningActor.SigningReply signingReply =
                     org.apache.pekko.actor.typed.javadsl.AskPattern.<WalletSigningActor.SigningCommand, WalletSigningActor.SigningReply>ask(
                             signingActor,
                             replyTo -> new WalletSigningActor.PrepareSigner(
-                                    cmd.walletId(), available, addressToIndex, networkType, replyTo),
+                                    cmd.walletId(), available, addressToIndex, networkType,
+                                    buildScriptResolver(pluginRegistry, networkType), replyTo),
                             SIGNING_TIMEOUT, ctx.getSystem().scheduler()
                     ).toCompletableFuture().get(SIGNING_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
 
@@ -470,6 +478,7 @@ public final class PaymentCoordinator {
             DataSource dataSource,
             TransactionBuildService transactionBuildService,
             ActorRef<WalletSigningActor.SigningCommand> signingActor,
+            org.apache.pekko.cluster.sharding.typed.javadsl.ClusterSharding sharding,
             CoordinatorCommand.BuildPayment cmd) {
 
         try {
@@ -489,15 +498,17 @@ public final class PaymentCoordinator {
             }
             NetworkType networkType = summaryOpt.get().networkType();
 
-            // 3. Look up address -> derivation index map
-            Map<String, Integer> addressToIndex = readModelStorage.findAddressIndexMap(dataSource, cmd.walletId());
+            // 3. Look up address -> derivation index map from aggregate
+            Map<String, Integer> addressToIndex = queryAddressIndices(sharding, cmd.walletId(), ctx);
 
             // 4. Ask signing actor for signer + public keys
+            // Standard payments only spend P2PKH — no plugin script resolver needed.
             WalletSigningActor.SigningReply signingReply =
                     org.apache.pekko.actor.typed.javadsl.AskPattern.<WalletSigningActor.SigningCommand, WalletSigningActor.SigningReply>ask(
                             signingActor,
                             replyTo -> new WalletSigningActor.PrepareSigner(
-                                    cmd.walletId(), available, addressToIndex, networkType, replyTo),
+                                    cmd.walletId(), available, addressToIndex, networkType,
+                                    null, replyTo),
                             SIGNING_TIMEOUT, ctx.getSystem().scheduler()
                     ).toCompletableFuture().get(SIGNING_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
 
@@ -798,6 +809,48 @@ public final class PaymentCoordinator {
         );
         ctx.getSelf().tell(new CoordinatorCommand.RecordUtxo(
                 walletId, utxo, ctx.getSystem().ignoreRef()));
+    }
+
+    private static WalletSigningActor.ScriptAddressResolver buildScriptResolver(
+            PluginRegistry pluginRegistry, NetworkType networkType) {
+        NetworkAddressType addrType = toNetworkAddressType(networkType);
+        return scriptBytes -> {
+            Script script = new Script(scriptBytes);
+            String addr = deriveStandardAddress(script, addrType);
+            if (addr != null) return addr;
+            if (pluginRegistry.hasPlugins()) {
+                Optional<PluginRegistry.PluginIdentification> id = pluginRegistry.identifyScript(scriptBytes);
+                if (id.isPresent()) {
+                    ScriptPlugin plugin = pluginRegistry.getPlugin(id.get().pluginId()).orElse(null);
+                    if (plugin != null) {
+                        Map<String, Object> meta = plugin.extractMetadata(scriptBytes);
+                        if (meta != null) return (String) meta.get("ownerAddress");
+                    }
+                }
+            }
+            return null;
+        };
+    }
+
+    private static Map<String, Integer> queryAddressIndices(
+            org.apache.pekko.cluster.sharding.typed.javadsl.ClusterSharding sharding,
+            String walletId, ActorContext<CoordinatorCommand> ctx) {
+        try {
+            var walletRef = sharding.entityRefFor(
+                    org.twostack.libspiffy4j.aggregate.wallet.WalletAggregate.ENTITY_TYPE_KEY, walletId);
+            WalletReply reply = org.apache.pekko.actor.typed.javadsl.AskPattern
+                    .<WalletCommand, WalletReply>ask(
+                            walletRef,
+                            replyTo -> new WalletCommand.QueryAddressIndicesCommand(walletId, replyTo),
+                            SIGNING_TIMEOUT, ctx.getSystem().scheduler()
+                    ).toCompletableFuture().get(SIGNING_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
+            if (reply instanceof WalletReply.AddressIndices ai) {
+                return ai.addressToIndex();
+            }
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Failed to query address indices from aggregate for wallet " + walletId, e);
+        }
+        return Map.of();
     }
 
     static String deriveStandardAddress(Script script, NetworkAddressType addrType) {

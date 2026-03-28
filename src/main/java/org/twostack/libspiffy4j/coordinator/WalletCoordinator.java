@@ -132,7 +132,7 @@ public final class WalletCoordinator {
                         onMarkInvoicePaid(ctx, sharding, pendingCorrelations, cmd))
                 .onMessage(CoordinatorCommand.BuildPayment.class, cmd -> {
                     PaymentCoordinator.buildPayment(ctx, readModelStorage, dataSource,
-                            transactionBuildService, signingActor, cmd);
+                            transactionBuildService, signingActor, sharding, cmd);
                     return Behaviors.same();
                 })
                 .onMessage(CoordinatorCommand.BuildPluginPayment.class, cmd ->
@@ -273,15 +273,15 @@ public final class WalletCoordinator {
             String address = cryptoService.generateAddress(childKey, networkType);
 
             String correlationId = UUID.randomUUID().toString();
-            pending.put(correlationId, new PendingRequest(ctx.getSystem().ignoreRef(), "RecordAddress"));
+            // Stash the reply — only send AddressDerived after the aggregate confirms
+            pending.put(correlationId, new PendingRequest(cmd.replyTo(), "DeriveAddress",
+                    new CoordinatorReply.AddressDerived(address, nextIndex)));
             ActorRef<WalletReply> adapter = spawnWalletReplyBridge(ctx, correlationId);
 
             EntityRef<WalletCommand> walletRef =
                     sharding.entityRefFor(WalletAggregate.ENTITY_TYPE_KEY, cmd.walletId());
             walletRef.tell(new WalletCommand.RecordAddressCommand(
                     cmd.walletId(), new AddressMetadata(address, nextIndex, false), adapter));
-
-            cmd.replyTo().tell(new CoordinatorReply.AddressDerived(address, nextIndex));
         } catch (Exception e) {
             cmd.replyTo().tell(new CoordinatorReply.Failure("Address derivation failed: " + e.getMessage()));
         }
@@ -465,7 +465,7 @@ public final class WalletCoordinator {
             CoordinatorCommand.BuildPluginPayment cmd) {
 
         CoordinatorReply result = PaymentCoordinator.buildPluginPayment(ctx, pluginRegistry,
-                readModelStorage, dataSource, transactionBuildService, arcService, signingActor, cmd);
+                readModelStorage, dataSource, transactionBuildService, arcService, signingActor, sharding, cmd);
 
         if (result instanceof CoordinatorReply.Failure) {
             cmd.replyTo().tell(result);
@@ -518,7 +518,7 @@ public final class WalletCoordinator {
             CoordinatorCommand.BuildPluginPaymentNoBroadcast cmd) {
 
         CoordinatorReply result = PaymentCoordinator.buildPluginPaymentNoBroadcast(ctx, pluginRegistry,
-                readModelStorage, dataSource, transactionBuildService, arcService, signingActor, cmd);
+                readModelStorage, dataSource, transactionBuildService, arcService, signingActor, sharding, cmd);
 
         if (result instanceof CoordinatorReply.Failure) {
             cmd.replyTo().tell(result);
@@ -556,7 +556,7 @@ public final class WalletCoordinator {
             CoordinatorCommand.BuildPluginProvisioning cmd) {
 
         CoordinatorReply result = PaymentCoordinator.buildPluginProvisioning(ctx, pluginRegistry,
-                readModelStorage, dataSource, arcService, signingActor, cmd);
+                readModelStorage, dataSource, arcService, signingActor, sharding, cmd);
 
         if (result instanceof CoordinatorReply.Failure) {
             cmd.replyTo().tell(result);
@@ -716,6 +716,7 @@ public final class WalletCoordinator {
             }
             case WalletReply.Failure failure ->
                     request.replyTo().tell(new CoordinatorReply.Failure(failure.reason()));
+            case WalletReply.AddressIndices ignored -> {} // handled inline by PaymentCoordinator
         }
         return Behaviors.same();
     }

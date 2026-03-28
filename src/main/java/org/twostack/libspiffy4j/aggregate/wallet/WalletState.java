@@ -20,7 +20,7 @@ public class WalletState implements SpiffyEvent {
     private NetworkType networkType;
     private WalletType walletType;
     private Map<String, UtxoEntry> utxoEntries = new HashMap<>();
-    private Set<String> knownAddresses = new HashSet<>();
+    private Map<String, Integer> addressDerivationIndices = new HashMap<>();
     private Set<String> knownTxids = new HashSet<>();
     private int nextDerivationIndex;
     private Map<String, Object> metadata = new HashMap<>();
@@ -46,7 +46,7 @@ public class WalletState implements SpiffyEvent {
     }
 
     public WalletState applyAddressRecorded(WalletEvent.AddressRecordedEvent event) {
-        this.knownAddresses.add(event.addressMetadata().address());
+        this.addressDerivationIndices.put(event.addressMetadata().address(), event.derivationIndex());
         if (event.derivationIndex() >= this.nextDerivationIndex) {
             this.nextDerivationIndex = event.derivationIndex() + 1;
         }
@@ -140,8 +140,10 @@ public class WalletState implements SpiffyEvent {
     public Map<String, UtxoEntry> getUtxoEntries() { return utxoEntries; }
     public void setUtxoEntries(Map<String, UtxoEntry> utxoEntries) { this.utxoEntries = utxoEntries; }
 
-    public Set<String> getKnownAddresses() { return knownAddresses; }
-    public void setKnownAddresses(Set<String> knownAddresses) { this.knownAddresses = knownAddresses; }
+    public Map<String, Integer> getAddressDerivationIndices() { return addressDerivationIndices; }
+    public void setAddressDerivationIndices(Map<String, Integer> addressDerivationIndices) { this.addressDerivationIndices = addressDerivationIndices; }
+
+    public Set<String> getKnownAddresses() { return addressDerivationIndices.keySet(); }
 
     public Set<String> getKnownTxids() { return knownTxids; }
     public void setKnownTxids(Set<String> knownTxids) { this.knownTxids = knownTxids; }

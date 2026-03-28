@@ -20,10 +20,7 @@ import org.twostack.libspiffy4j.storage.postgres.SecureStorage;
 
 import javax.sql.DataSource;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
+import java.util.*;
 import java.util.logging.Logger;
 
 /**
@@ -50,11 +47,23 @@ public final class WalletSigningActor extends AbstractBehavior<WalletSigningActo
      * funding UTXOs. The signer closure derives the correct child key per input
      * using the address → derivation index map.
      */
+    /**
+     * Resolves the owner address from a locking script's raw bytes.
+     * Injected by the coordinator so the signing actor can derive the
+     * correct key for any wallet-owned output without depending on
+     * PluginRegistry or WalletReadModelStorage directly.
+     */
+    @FunctionalInterface
+    public interface ScriptAddressResolver {
+        String resolve(byte[] scriptPubKey);
+    }
+
     public record PrepareSigner(
             String walletId,
             List<BitcoinUtxo> fundingUtxos,
             Map<String, Integer> addressToDerivationIndex,
             NetworkType networkType,
+            ScriptAddressResolver scriptAddressResolver,
             ActorRef<SigningReply> replyTo
     ) implements SigningCommand {}
 
@@ -159,22 +168,46 @@ public final class WalletSigningActor extends AbstractBehavior<WalletSigningActo
 
         List<BitcoinUtxo> fundingUtxos = cmd.fundingUtxos();
         Map<String, Integer> addressToIndex = cmd.addressToDerivationIndex();
+        ScriptAddressResolver resolver = cmd.scriptAddressResolver();
 
-        // Build signer closure — derives the correct child key per input
-        CallbackTransactionSigner signer = (sighash, inputIndex) -> {
-            LOG.info("Signer called for inputIndex=" + inputIndex
-                    + " sighash=" + Utils.HEX.encode(sighash).substring(0, 16) + "...");
-            String address = fundingUtxos.get(inputIndex).address();
-            int derivIdx = addressToIndex.getOrDefault(address, 0);
-            LOG.info("  address=" + address + " derivIdx=" + derivIdx);
-            DeterministicKey childKey = cryptoService.derivePrivateKey(hdKey, 0, derivIdx, coinType, false);
-            org.twostack.bitcoin4j.ECKey ecKey =
-                    org.twostack.bitcoin4j.ECKey.fromPrivate(childKey.getPrivKeyBytes(), true);
-            LOG.info("  pubKey=" + Utils.HEX.encode(ecKey.getPubKey()));
-            org.twostack.bitcoin4j.ECKey.ECDSASignature sig =
-                    ecKey.sign(Sha256Hash.wrap(sighash));
-            LOG.info("  signature produced, DER length=" + sig.encodeToDER().length);
-            return sig.encodeToDER();
+        // Build signer closure — derives the correct child key per input.
+        // The 3-arg overload receives the locking script, resolves the owner
+        // address via the injected resolver, then uses addressToDerivationIndex
+        // to derive the correct HD key.
+        CallbackTransactionSigner signer = new CallbackTransactionSigner() {
+            @Override
+            public byte[] sign(byte[] sighash, int inputIndex) {
+                // Legacy path — positional lookup from coordinator-selected UTXOs
+                return signWithAddress(sighash, inputIndex, fundingUtxos.get(inputIndex).address());
+            }
+
+            @Override
+            public byte[] sign(byte[] sighash, int inputIndex, byte[] scriptPubKey) {
+                String address = (resolver != null && scriptPubKey != null)
+                        ? resolver.resolve(scriptPubKey) : null;
+                if (address == null) {
+                    // Fallback to positional lookup
+                    address = fundingUtxos.size() > inputIndex
+                            ? fundingUtxos.get(inputIndex).address()
+                            : fundingUtxos.get(0).address();
+                }
+                return signWithAddress(sighash, inputIndex, address);
+            }
+
+            private byte[] signWithAddress(byte[] sighash, int inputIndex, String address) {
+                LOG.info("Signer called for inputIndex=" + inputIndex
+                        + " sighash=" + Utils.HEX.encode(sighash).substring(0, 16) + "...");
+                int derivIdx = addressToIndex.getOrDefault(address, 0);
+                LOG.info("  address=" + address + " derivIdx=" + derivIdx);
+                DeterministicKey childKey = cryptoService.derivePrivateKey(hdKey, 0, derivIdx, coinType, false);
+                org.twostack.bitcoin4j.ECKey ecKey =
+                        org.twostack.bitcoin4j.ECKey.fromPrivate(childKey.getPrivKeyBytes(), true);
+                LOG.info("  pubKey=" + Utils.HEX.encode(ecKey.getPubKey()));
+                org.twostack.bitcoin4j.ECKey.ECDSASignature sig =
+                        ecKey.sign(Sha256Hash.wrap(sighash));
+                LOG.info("  signature produced, DER length=" + sig.encodeToDER().length);
+                return sig.encodeToDER();
+            }
         };
 
         // Derive public keys for each funding UTXO

@@ -79,7 +79,8 @@ public class WalletAggregate
                 .onCommand(WalletCommand.ReleaseUtxoCommand.class, this::onReleaseUtxo)
                 .onCommand(WalletCommand.MarkUtxoSpentCommand.class, this::onMarkUtxoSpent)
                 .onCommand(WalletCommand.UpdateConfirmationCommand.class, this::onUpdateConfirmation)
-                .onCommand(WalletCommand.CleanupExpiredReservationsCommand.class, this::onCleanupExpiredReservations);
+                .onCommand(WalletCommand.CleanupExpiredReservationsCommand.class, this::onCleanupExpiredReservations)
+                .onCommand(WalletCommand.QueryAddressIndicesCommand.class, this::onQueryAddressIndices);
 
         return builder.build();
     }
@@ -186,6 +187,12 @@ public class WalletAggregate
         }
         return Effect().persist(events)
                 .thenReply(cmd.replyTo(), s -> new WalletReply.Success(s));
+    }
+
+    private org.apache.pekko.persistence.typed.javadsl.Effect<WalletEvent, WalletState> onQueryAddressIndices(
+            WalletState state, WalletCommand.QueryAddressIndicesCommand cmd) {
+        return Effect().reply(cmd.replyTo(),
+                new WalletReply.AddressIndices(new java.util.HashMap<>(state.getAddressDerivationIndices())));
     }
 
     private org.apache.pekko.persistence.typed.javadsl.Effect<WalletEvent, WalletState> onCleanupExpiredReservations(

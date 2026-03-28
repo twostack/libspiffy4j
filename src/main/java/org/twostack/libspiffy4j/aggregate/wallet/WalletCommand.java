@@ -19,7 +19,8 @@ public sealed interface WalletCommand permits
         WalletCommand.ReleaseUtxoCommand,
         WalletCommand.MarkUtxoSpentCommand,
         WalletCommand.UpdateConfirmationCommand,
-        WalletCommand.CleanupExpiredReservationsCommand {
+        WalletCommand.CleanupExpiredReservationsCommand,
+        WalletCommand.QueryAddressIndicesCommand {
 
     record CreateWalletCommand(
             String walletId,
@@ -80,6 +81,11 @@ public sealed interface WalletCommand permits
     ) implements WalletCommand {}
 
     record CleanupExpiredReservationsCommand(
+            String walletId,
+            ActorRef<WalletReply> replyTo
+    ) implements WalletCommand {}
+
+    record QueryAddressIndicesCommand(
             String walletId,
             ActorRef<WalletReply> replyTo
     ) implements WalletCommand {}
