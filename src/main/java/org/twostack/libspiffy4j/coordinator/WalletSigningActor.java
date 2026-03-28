@@ -197,7 +197,13 @@ public final class WalletSigningActor extends AbstractBehavior<WalletSigningActo
             private byte[] signWithAddress(byte[] sighash, int inputIndex, String address) {
                 LOG.info("Signer called for inputIndex=" + inputIndex
                         + " sighash=" + Utils.HEX.encode(sighash).substring(0, 16) + "...");
-                int derivIdx = addressToIndex.getOrDefault(address, 0);
+                Integer derivIdx = addressToIndex.get(address);
+                if (derivIdx == null) {
+                    throw new IllegalStateException(
+                            "No derivation index for address " + address
+                            + " at inputIndex=" + inputIndex
+                            + ". Known addresses: " + addressToIndex.keySet());
+                }
                 LOG.info("  address=" + address + " derivIdx=" + derivIdx);
                 DeterministicKey childKey = cryptoService.derivePrivateKey(hdKey, 0, derivIdx, coinType, false);
                 org.twostack.bitcoin4j.ECKey ecKey =
@@ -213,7 +219,13 @@ public final class WalletSigningActor extends AbstractBehavior<WalletSigningActo
         // Derive public keys for each funding UTXO
         List<String> publicKeyHexes = new ArrayList<>();
         for (BitcoinUtxo utxo : fundingUtxos) {
-            int derivIdx = addressToIndex.getOrDefault(utxo.address(), 0);
+            Integer derivIdx = addressToIndex.get(utxo.address());
+            if (derivIdx == null) {
+                throw new IllegalStateException(
+                        "No derivation index for UTXO address " + utxo.address()
+                        + " (txid=" + utxo.txid() + ":" + utxo.vout()
+                        + "). Known addresses: " + addressToIndex.keySet());
+            }
             DeterministicKey childKey = cryptoService.derivePrivateKey(hdKey, 0, derivIdx, coinType, false);
             org.twostack.bitcoin4j.ECKey ecKey =
                     org.twostack.bitcoin4j.ECKey.fromPrivate(childKey.getPrivKeyBytes(), true);
