@@ -351,4 +351,65 @@ class WalletAggregateTest {
         assertThat(state.getWalletId()).isEqualTo(walletId);
         assertThat(state.getUtxoEntries()).containsKey("txRecovery:0");
     }
+
+    @Test
+    void queryAddressIndices_returnsAllRecordedAddresses() {
+        String walletId = "wallet-addr-indices";
+        createWallet(walletId);
+        TestProbe<WalletReply> probe = testKit.createTestProbe();
+
+        // Record two addresses at different derivation indices
+        walletRef(walletId).tell(new WalletCommand.RecordAddressCommand(
+                walletId, new AddressMetadata("addr_root", 0, false), probe.ref()));
+        probe.receiveMessage(TIMEOUT);
+
+        walletRef(walletId).tell(new WalletCommand.RecordAddressCommand(
+                walletId, new AddressMetadata("addr_derived", 1, false), probe.ref()));
+        probe.receiveMessage(TIMEOUT);
+
+        // Query the address indices
+        walletRef(walletId).tell(new WalletCommand.QueryAddressIndicesCommand(walletId, probe.ref()));
+        WalletReply reply = probe.receiveMessage(TIMEOUT);
+
+        assertThat(reply).isInstanceOf(WalletReply.AddressIndices.class);
+        Map<String, Integer> indices = ((WalletReply.AddressIndices) reply).addressToIndex();
+        assertThat(indices).containsEntry("addr_root", 0);
+        assertThat(indices).containsEntry("addr_derived", 1);
+        assertThat(indices).hasSize(2);
+    }
+
+    @Test
+    void queryAddressIndices_emptyBeforeAnyAddresses() {
+        String walletId = "wallet-addr-empty";
+        createWallet(walletId);
+        TestProbe<WalletReply> probe = testKit.createTestProbe();
+
+        walletRef(walletId).tell(new WalletCommand.QueryAddressIndicesCommand(walletId, probe.ref()));
+        WalletReply reply = probe.receiveMessage(TIMEOUT);
+
+        assertThat(reply).isInstanceOf(WalletReply.AddressIndices.class);
+        assertThat(((WalletReply.AddressIndices) reply).addressToIndex()).isEmpty();
+    }
+
+    @Test
+    void addressDerivationIndices_survivesRecovery() {
+        String walletId = "wallet-addr-recovery";
+        createWallet(walletId);
+        TestProbe<WalletReply> probe = testKit.createTestProbe();
+
+        walletRef(walletId).tell(new WalletCommand.RecordAddressCommand(
+                walletId, new AddressMetadata("addr_persist", 5, false), probe.ref()));
+        probe.receiveMessage(TIMEOUT);
+
+        // Spawn a separate actor with the same persistence ID to simulate recovery
+        PersistenceId pid = PersistenceId.of(WalletAggregate.ENTITY_TYPE_KEY.name(), walletId);
+        ActorRef<WalletCommand> recovered = testKit.spawn(WalletAggregate.create(pid));
+
+        recovered.tell(new WalletCommand.QueryAddressIndicesCommand(walletId, probe.ref()));
+        WalletReply reply = probe.receiveMessage(TIMEOUT);
+
+        assertThat(reply).isInstanceOf(WalletReply.AddressIndices.class);
+        assertThat(((WalletReply.AddressIndices) reply).addressToIndex())
+                .containsEntry("addr_persist", 5);
+    }
 }
