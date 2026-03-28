@@ -148,7 +148,7 @@ public final class PaymentCoordinator {
 
             PluginTransactionRequest request = new PluginTransactionRequest(
                     available, ready.signer(), transactionLookup,
-                    ready.publicKeyHexes(), cmd.changeAddress(), cmd.pluginParams());
+                    ready.publicKeyHexes(), cmd.pluginParams());
 
             LOG.info("Invoking plugin " + cmd.pluginId() + " action=" + cmd.action());
             TransactionBuilderResult result = plugin.buildTransaction(request);
@@ -212,7 +212,7 @@ public final class PaymentCoordinator {
 
             // Post-operation: check inventory and trigger auto-provision if needed
             checkInventoryAndAutoProvision(ctx, readModelStorage, dataSource,
-                    cmd.walletId(), cmd.pluginId(), cmd.changeAddress());
+                    cmd.walletId(), cmd.pluginId());
 
             return new CoordinatorReply.PluginPaymentBuilt(
                     result.txid(), result.rawHex(), beefHex, result.feeSats(),
@@ -303,7 +303,7 @@ public final class PaymentCoordinator {
 
             PluginTransactionRequest request = new PluginTransactionRequest(
                     available, ready.signer(), transactionLookup,
-                    ready.publicKeyHexes(), cmd.changeAddress(), cmd.pluginParams());
+                    ready.publicKeyHexes(), cmd.pluginParams());
 
             LOG.info("Invoking plugin " + cmd.pluginId() + " action=" + cmd.action());
             TransactionBuilderResult result = plugin.buildTransaction(request);
@@ -322,7 +322,7 @@ public final class PaymentCoordinator {
 
             // Post-operation: check inventory and trigger auto-provision if needed
             checkInventoryAndAutoProvision(ctx, readModelStorage, dataSource,
-                    cmd.walletId(), cmd.pluginId(), cmd.changeAddress());
+                    cmd.walletId(), cmd.pluginId());
 
             String beefHex = buildBeefEnvelope(result.rawHex(), readModelStorage, dataSource, arcService);
 
@@ -407,7 +407,7 @@ public final class PaymentCoordinator {
 
             PluginTransactionRequest request = new PluginTransactionRequest(
                     available, ready.signer(), transactionLookup,
-                    ready.publicKeyHexes(), cmd.changeAddress(), cmd.pluginParams());
+                    ready.publicKeyHexes(), cmd.pluginParams());
 
             LOG.info("Invoking plugin " + cmd.pluginId() + " provisionFunding");
             List<ProvisionedTransaction> transactions = plugin.provisionFunding(request);
@@ -523,8 +523,10 @@ public final class PaymentCoordinator {
             org.twostack.bitcoin4j.ECKey signingKey = org.twostack.bitcoin4j.ECKey.fromPublicOnly(
                     Utils.HEX.decode(ready.publicKeyHexes().get(0)));
 
+            // Change goes back to the first funding UTXO's address
+            String changeAddress = available.get(0).address();
             TransactionBuildResult result = transactionBuildService.buildTransaction(
-                    available, cmd.outputs(), cmd.config(), cmd.changeAddress(),
+                    available, cmd.outputs(), cmd.config(), changeAddress,
                     signingKey, networkType);
 
             cmd.replyTo().tell(new CoordinatorReply.PaymentBuilt(result));
@@ -646,8 +648,7 @@ public final class PaymentCoordinator {
             WalletReadModelStorage readModelStorage,
             DataSource dataSource,
             String walletId, String txid, String rawHex,
-            Map<String, Integer> addressToIndex,
-            String changeAddress) {
+            Map<String, Integer> addressToIndex) {
 
         if (rawHex == null || rawHex.isBlank()) return;
 
@@ -659,9 +660,11 @@ public final class PaymentCoordinator {
             if (summaryOpt.isEmpty()) return;
             NetworkAddressType addrType = toNetworkAddressType(summaryOpt.get().networkType());
 
-            Set<String> walletAddresses = new HashSet<>(
-                    readModelStorage.findAddressesByWalletId(dataSource, walletId));
-            if (changeAddress != null) walletAddresses.add(changeAddress);
+            // The aggregate's addressToIndex is the authoritative source of wallet
+            // addresses — no read model query needed for ownership checks.
+            Set<String> walletAddresses = addressToIndex != null
+                    ? addressToIndex.keySet()
+                    : new HashSet<>(readModelStorage.findAddressesByWalletId(dataSource, walletId));
 
             for (int vout = 0; vout < outputs.size(); vout++) {
                 TransactionOutput output = outputs.get(vout);
@@ -730,7 +733,6 @@ public final class PaymentCoordinator {
             DataSource dataSource,
             String walletId, String txid, String rawHex,
             Map<String, Integer> addressToIndex,
-            String changeAddress,
             String earmarkPurpose, int fundingVout) {
 
         if (rawHex == null || rawHex.isBlank()) return;
@@ -743,9 +745,9 @@ public final class PaymentCoordinator {
             if (summaryOpt.isEmpty()) return;
             NetworkAddressType addrType = toNetworkAddressType(summaryOpt.get().networkType());
 
-            Set<String> walletAddresses = new HashSet<>(
-                    readModelStorage.findAddressesByWalletId(dataSource, walletId));
-            if (changeAddress != null) walletAddresses.add(changeAddress);
+            Set<String> walletAddresses = addressToIndex != null
+                    ? addressToIndex.keySet()
+                    : new HashSet<>(readModelStorage.findAddressesByWalletId(dataSource, walletId));
 
             for (int vout = 0; vout < outputs.size(); vout++) {
                 TransactionOutput output = outputs.get(vout);
@@ -883,7 +885,7 @@ public final class PaymentCoordinator {
             ActorContext<CoordinatorCommand> ctx,
             WalletReadModelStorage readModelStorage,
             DataSource dataSource,
-            String walletId, String pluginId, String changeAddress) {
+            String walletId, String pluginId) {
 
         try {
             Optional<WalletSummary> summaryOpt = readModelStorage.findWalletSummary(dataSource, walletId);
@@ -939,7 +941,7 @@ public final class PaymentCoordinator {
             provisionParams.put("lifecycleSteps", stepsNeeded);
 
             ctx.getSelf().tell(new CoordinatorCommand.BuildPluginProvisioning(
-                    walletId, pluginId, provisionParams, changeAddress,
+                    walletId, pluginId, provisionParams,
                     ctx.spawnAnonymous(org.apache.pekko.actor.typed.javadsl.Behaviors.receiveMessage(reply -> {
                         guard.set(false);
                         if (reply instanceof CoordinatorReply.Failure failure) {

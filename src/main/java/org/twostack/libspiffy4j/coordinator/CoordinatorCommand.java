@@ -132,21 +132,21 @@ public sealed interface CoordinatorCommand permits
 
     record BuildPayment(
             String walletId, List<InvoiceOutputSpec> outputs,
-            TransactionBuildConfig config, String changeAddress,
+            TransactionBuildConfig config,
             ActorRef<CoordinatorReply> replyTo
     ) implements CoordinatorCommand {}
 
     record BuildPluginPayment(
             String walletId, String pluginId, String action,
             Map<String, Object> pluginParams,
-            TransactionBuildConfig config, String changeAddress,
+            TransactionBuildConfig config,
             ActorRef<CoordinatorReply> replyTo
     ) implements CoordinatorCommand {}
 
     record BuildPluginPaymentNoBroadcast(
             String walletId, String pluginId, String action,
             Map<String, Object> pluginParams,
-            TransactionBuildConfig config, String changeAddress,
+            TransactionBuildConfig config,
             ActorRef<CoordinatorReply> replyTo
     ) implements CoordinatorCommand {}
 
@@ -157,7 +157,6 @@ public sealed interface CoordinatorCommand permits
     record BuildPluginProvisioning(
             String walletId, String pluginId,
             Map<String, Object> pluginParams,
-            String changeAddress,
             ActorRef<CoordinatorReply> replyTo
     ) implements CoordinatorCommand {}
 

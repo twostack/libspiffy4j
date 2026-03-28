@@ -18,7 +18,6 @@ import java.util.Map;
  *                          through the wallet's append-only log. May be {@code null} if the
  *                          coordinator does not support transaction lookup.
  * @param publicKeyHexes hex-encoded public keys for building unlock scripts
- * @param changeAddress address for the change output
  * @param params plugin-specific parameters (e.g., tokenId, action, recipientAddress)
  */
 public record PluginTransactionRequest(
@@ -26,7 +25,6 @@ public record PluginTransactionRequest(
         CallbackTransactionSigner signer,
         TransactionLookup transactionLookup,
         List<String> publicKeyHexes,
-        String changeAddress,
         Map<String, Object> params
 ) {
     public PluginTransactionRequest {

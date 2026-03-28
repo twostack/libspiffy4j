@@ -485,10 +485,9 @@ public final class WalletCoordinator {
                 sharding.entityRefFor(WalletAggregate.ENTITY_TYPE_KEY, cmd.walletId());
         walletRef.tell(new WalletCommand.RecordTransactionCommand(cmd.walletId(), btcTx, adapter));
 
-        // Auto-record wallet-owned output UTXOs — pass changeAddress so newly
-        // derived addresses are included in matching without waiting for projection.
+        // Auto-record wallet-owned output UTXOs
         PaymentCoordinator.autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
-                cmd.walletId(), built.txid(), built.rawHex(), null, cmd.changeAddress());
+                cmd.walletId(), built.txid(), built.rawHex(), null);
 
         // Record paired witness TX if present
         if (built.witnessTxid() != null && built.witnessRawHex() != null) {
@@ -499,7 +498,7 @@ public final class WalletCoordinator {
             walletRef.tell(new WalletCommand.RecordTransactionCommand(
                     cmd.walletId(), witnessBtcTx, witnessAdapter));
             PaymentCoordinator.autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage,
-                    dataSource, cmd.walletId(), built.witnessTxid(), built.witnessRawHex(), null, cmd.changeAddress());
+                    dataSource, cmd.walletId(), built.witnessTxid(), built.witnessRawHex(), null);
         }
 
         return Behaviors.same();
@@ -539,7 +538,7 @@ public final class WalletCoordinator {
         walletRef.tell(new WalletCommand.RecordTransactionCommand(cmd.walletId(), btcTx, adapter));
 
         PaymentCoordinator.autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
-                cmd.walletId(), built.txid(), built.rawHex(), null, cmd.changeAddress());
+                cmd.walletId(), built.txid(), built.rawHex(), null);
 
         return Behaviors.same();
     }
@@ -593,11 +592,11 @@ public final class WalletCoordinator {
             // after earmark TXs consume them.
             if (ptx.purpose() != null && ptx.fundingVout() >= 0) {
                 PaymentCoordinator.autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
-                        cmd.walletId(), ptx.txid(), ptx.rawHex(), null, cmd.changeAddress(),
+                        cmd.walletId(), ptx.txid(), ptx.rawHex(), null,
                         ptx.purpose(), ptx.fundingVout());
             } else {
                 PaymentCoordinator.autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
-                        cmd.walletId(), ptx.txid(), ptx.rawHex(), null, cmd.changeAddress());
+                        cmd.walletId(), ptx.txid(), ptx.rawHex(), null);
             }
         }
 
@@ -656,7 +655,7 @@ public final class WalletCoordinator {
                 cmd.walletId(), cmd.transaction(), adapter));
 
         PaymentCoordinator.autoRecordOutputUtxos(ctx, pluginRegistry, readModelStorage, dataSource,
-                cmd.walletId(), cmd.transaction().txid(), cmd.transaction().rawHex(), null, null);
+                cmd.walletId(), cmd.transaction().txid(), cmd.transaction().rawHex(), null);
 
         return Behaviors.same();
     }
