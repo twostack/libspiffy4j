@@ -635,7 +635,8 @@ public final class PaymentCoordinator {
             WalletReadModelStorage readModelStorage,
             DataSource dataSource,
             String walletId, String txid, String rawHex,
-            Map<String, Integer> addressToIndex) {
+            Map<String, Integer> addressToIndex,
+            String changeAddress) {
 
         if (rawHex == null || rawHex.isBlank()) return;
 
@@ -649,6 +650,7 @@ public final class PaymentCoordinator {
 
             Set<String> walletAddresses = new HashSet<>(
                     readModelStorage.findAddressesByWalletId(dataSource, walletId));
+            if (changeAddress != null) walletAddresses.add(changeAddress);
 
             for (int vout = 0; vout < outputs.size(); vout++) {
                 TransactionOutput output = outputs.get(vout);
@@ -717,6 +719,7 @@ public final class PaymentCoordinator {
             DataSource dataSource,
             String walletId, String txid, String rawHex,
             Map<String, Integer> addressToIndex,
+            String changeAddress,
             String earmarkPurpose, int fundingVout) {
 
         if (rawHex == null || rawHex.isBlank()) return;
@@ -731,6 +734,7 @@ public final class PaymentCoordinator {
 
             Set<String> walletAddresses = new HashSet<>(
                     readModelStorage.findAddressesByWalletId(dataSource, walletId));
+            if (changeAddress != null) walletAddresses.add(changeAddress);
 
             for (int vout = 0; vout < outputs.size(); vout++) {
                 TransactionOutput output = outputs.get(vout);
